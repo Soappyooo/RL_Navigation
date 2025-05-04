@@ -3,235 +3,285 @@ from mlagents_envs.side_channel.engine_configuration_channel import EngineConfig
 from mlagents_envs.side_channel.environment_parameters_channel import EnvironmentParametersChannel
 from mlagents_envs.base_env import ActionTuple, DecisionSteps
 import numpy as np
-from typing import Optional
+from typing import Optional, Tuple, Dict, Any
 import time
-import random
 import cv2 as cv
 import gym
-import os
 import socket
-def IsOpen(port, ip='127.0.0.1'):
-    s = socket.socket(socket.AF_INET,socket.SOCK_STREAM)
-    result = s.connect_ex((ip,int(port)))
-    if result == 0:
-        print("port {} is used".format(port))
-        return True
-    else:
-        print("port {} is not used".format(port))
-        return False
 
-TEAM_NAME = 'ControlEP?team=0'
+# Constants for Unity environment configuration
+TEAM_NAME = "ControlEP?team=0"
 AGENT_ID = 0
+DEFAULT_IMAGE_SIZE = (128, 128, 3)
+DEFAULT_STATE_SIZE = 7
 
-def warp_action(action):
-    action_dict = {'{}_{}'.format(TEAM_NAME, AGENT_ID): action}
-    return action_dict
+
+def check_port_availability(port: int, host: str = "127.0.0.1") -> bool:
+    """
+    Check if a port is available on the specified host.
+
+    Args:
+        port (int): Port number to check
+        host (str): Host address to check. Defaults to localhost
+
+    Returns:
+        bool: True if port is available, False if in use
+    """
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.settimeout(1)
+        result = sock.connect_ex((host, port))
+        if result == 0:
+            print(f"Port {port} is in use on {host}")
+            return False
+        elif result == 111:
+            print(f"Port {port} is available on {host}")
+            return True
+        else:
+            print(f"Port check failed with error code: {result}")
+            return False
+
 
 class EpMineEnv(gym.Env):
+    """
+    A custom Gym environment for robotic mineral collection task using Unity ML-Agents.
 
-    def __init__(self,
-                 file_name: str = "envs/SingleAgent/MineField_Linux/drl.x86_64",
-                 port: Optional[int] = 2000,
-                 seed: int = 0,
-                 work_id: int = 0,
-                 time_scale: float = 20.0,
-                 max_episode_steps: int = 1000,
-                 only_image: bool = True,
-                 only_state: bool = False,
-                 no_graph: bool = False):
-        engine_configuration_channel = EngineConfigurationChannel()
-        engine_configuration_channel.set_configuration_parameters(width=200, height=100,
-                                                                      time_scale=time_scale, target_frame_rate=60)
-        self._engine_Environment_channel = EnvironmentParametersChannel()
+    This environment simulates a robot that needs to navigate to and collect minerals
+    in a given space. The robot can move in 3D space and control its arm for collection.
+    """
+
+    def __init__(
+        self,
+        file_name: str = "envs/SingleAgent/MineField_Linux/drl.x86_64",
+        port: Optional[int] = 2000,
+        seed: int = 0,
+        work_id: int = 0,
+        time_scale: float = 10,
+        max_episode_steps: int = 1000,
+        only_image: bool = True,
+        only_state: bool = False,
+        no_graphics: bool = False,
+    ):
+        """
+        Initialize the environment with given parameters.
+
+        Args:
+            file_name (str): Path to the Unity executable
+            port (int, optional): Base port for Unity communication
+            seed (int): Random seed for reproducibility
+            work_id (int): Worker ID for parallel environments
+            time_scale (float): Unity time scale factor
+            max_episode_steps (int): Maximum steps per episode
+            only_image (bool): If True, observation space only includes image
+            only_state (bool): If True, observation space only includes state vector
+            no_graphics (bool): If True, runs Unity environment without graphics
+        """
+        # Initialize Unity channels
+        self.engine_config_channel = EngineConfigurationChannel()
+        self.engine_config_channel.set_configuration_parameters(
+            width=200, height=100, time_scale=time_scale  # Large time_scale result in low FPS
+        )
+        self.env_param_channel = EnvironmentParametersChannel()
+
+        # Environment setup
         self.env = None
         self.port = port
         self.work_id = work_id
-        self.eng_conf_channel = engine_configuration_channel
         self.env_file_name = file_name
-        self.sd = seed
-        self.no_graph = no_graph
-        self.max_episode_length = max_episode_steps
-        self.step_num = 0
+        self.seed_value = seed
+        self.no_graphics = no_graphics
+        self.max_episode_steps = max_episode_steps
+
+        # Observation type flags
         self.only_image = only_image
         self.only_state = only_state
-        self.last_dist = 0.0
+
+        # Episode state
+        self.step_count = 0
+        self.last_distance = 0.0
         self.current_results = None
-        self.catch_state = 0
-    
-    def seed(self, sd=0):
-        if self.env is not None:
-            self.env.close()
-        worker_id = sd
-        while IsOpen(self.port+worker_id):
-            worker_id += 1
-        self.env = UnityEnvironment(file_name=self.env_file_name,
-                                    base_port=self.port,
-                                    seed=sd,
-                                    worker_id=worker_id,
-                                    side_channels=[self._engine_Environment_channel, self.eng_conf_channel],
-                                    no_graphics=self.no_graph
-                                    )
+        self.gripper_state = 0
 
     @property
-    def observation_space(self):
-        state_space = gym.spaces.Box(low=-np.Inf, high=np.Inf, shape=(7,), dtype=np.float32)
+    def observation_space(self) -> gym.spaces.Space:
+        """Define the observation space structure based on configuration."""
+        state_space = gym.spaces.Box(low=-np.Inf, high=np.Inf, shape=(DEFAULT_STATE_SIZE,), dtype=np.float32)
+
         if self.only_image:
-            image_space = gym.spaces.Box(low=0, high=255, shape=(128, 128, 3), dtype=np.uint8)
-            return image_space
+            return gym.spaces.Box(low=0, high=255, shape=DEFAULT_IMAGE_SIZE, dtype=np.uint8)
         elif self.only_state:
             return state_space
-        
 
-        return gym.spaces.Dict({'image': image_space, 'state': state_space})
-    
+        return gym.spaces.Dict(
+            {"image": gym.spaces.Box(low=0, high=255, shape=DEFAULT_IMAGE_SIZE, dtype=np.uint8), "state": state_space}
+        )
+
     @property
-    def action_space(self):
-        con_spc = gym.spaces.Box(low=np.array([-10.0, -10.0, -3.0]), high=np.array([10.0, 10.0, 3.0]), shape=(3,), dtype=np.float32)
-        return con_spc
-    
-    def decoder_results(self, results):
-        org_obs = results[TEAM_NAME].obs
-        img = cv.cvtColor(np.array(org_obs[0][AGENT_ID] * 255, dtype=np.uint8), cv.COLOR_RGB2BGR)
-        rotation = org_obs[1][AGENT_ID][0:4]
-        position = org_obs[1][AGENT_ID][4:7]
-        arm_angle = org_obs[1][AGENT_ID][7]
-        catching = org_obs[1][AGENT_ID][8]
-        is_catched = org_obs[1][AGENT_ID][9]
-        mineral_pose = org_obs[1][AGENT_ID][10:13]
-        state = org_obs[1][AGENT_ID]
-        obs = {"image": img, "state": state}
-        # print(position, mineral_pose)
-        self.catch_state = catching
+    def action_space(self) -> gym.spaces.Box:
+        """Define the action space for robot control."""
+        return gym.spaces.Box(
+            low=np.array([-10.0, -10.0, -3.0]), high=np.array([10.0, 10.0, 3.0]), shape=(3,), dtype=np.float32
+        )
+
+    def initialize_environment(self, seed: Optional[int] = None) -> None:
+        """
+        Initialize or reinitialize the Unity environment.
+
+        Args:
+            seed (int, optional): Random seed for the environment
+        """
+        if self.env is not None:
+            self.env.close()
+
+        worker_id = self.work_id
+        while not check_port_availability(self.port + worker_id):
+            worker_id += 1
+
+        self.env = UnityEnvironment(
+            file_name=self.env_file_name,
+            base_port=self.port,
+            seed=seed or self.seed_value,
+            worker_id=worker_id,
+            side_channels=[self.env_param_channel, self.engine_config_channel],
+            no_graphics=self.no_graphics,
+        )
+
+    def decode_observation(self, results: Dict[str, Any]) -> Dict[str, Any]:
+        """
+        Decode the observation from Unity environment results.
+
+        Args:
+            results: Raw results from Unity environment
+
+        Returns:
+            Processed observation dictionary
+        """
+        obs = results.obs
+        # Process image observation
+        image = cv.cvtColor(np.array(obs[0][AGENT_ID] * 255, dtype=np.uint8), cv.COLOR_RGB2BGR)
+
+        # Extract state information
+        state = obs[1][AGENT_ID]
+        self.gripper_state = state[8]  # Update gripper state
+
         if self.only_image:
-            return img
+            return image
         elif self.only_state:
-            return np.array(org_obs[1][AGENT_ID][:7])
-        return obs
-    
-    def get_robot_pose(self, results):
-        org_obs = results[TEAM_NAME].obs
-        rotation = org_obs[1][AGENT_ID][0:4]
-        position = org_obs[1][AGENT_ID][4:7]
+            return np.array(state[:7])
+
+        return {"image": image, "state": state}
+
+    def get_robot_pose(self, results: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
+        """Extract robot position and rotation from results."""
+        obs = results.obs
+        position = obs[1][AGENT_ID][4:7]
+        rotation = obs[1][AGENT_ID][0:4]
         return position, rotation
-    
-    def get_mine_pose(self, results):
-        org_obs = results[TEAM_NAME].obs
-        mineral_pose = org_obs[1][AGENT_ID][10:13]
-        return mineral_pose
-    
-    def get_dist_to_mine(self, reuslts):
-        mine_pose = self.get_mine_pose(results=reuslts)
-        robot_pose = self.get_robot_pose(results=reuslts)[0]
-        dist = np.sqrt(robot_pose[0] ** 2 + robot_pose[2] ** 2)
-        return dist
-    
-    def reset(self, seed=None, options=None):
+
+    def get_mineral_pose(self, results: Dict[str, Any]) -> np.ndarray:
+        """Extract mineral position from results."""
+        return results.obs[1][AGENT_ID][10:13]
+
+    def calculate_distance_to_mineral(self, results: Dict[str, Any]) -> float:
+        """Calculate distance between robot and mineral."""
+        robot_pos = self.get_robot_pose(results)[0]
+        return np.sqrt(robot_pos[0] ** 2 + robot_pos[2] ** 2)
+
+    def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Any:
+        """Reset the environment to initial state."""
         if seed is not None:
-            self.sd = seed
+            self.seed_value = seed
         if self.env is None:
-            self.seed(self.sd)
-        self.step_num = 0
+            self.initialize_environment(self.seed_value)
+
+        self.step_count = 0
         self.env.reset()
         obs, _, _, _ = self._step()
-        self.last_dist = self.get_dist_to_mine(self.current_results)
+        self.last_distance = self.calculate_distance_to_mineral(self.current_results)
         return obs
-    
-    def get_reward(self, results):
-        reward = results[TEAM_NAME].reward[AGENT_ID]
-        return reward
-    
-    def get_dense_reward(self, results):
-        final_reward = results[TEAM_NAME].reward[AGENT_ID]
-        # print(final_reward)
-        current_dist = self.get_dist_to_mine(reuslts=results)
-        # print(self.last_dist - current_dist)
-        delta_r = (self.last_dist - current_dist) 
-        final_reward += delta_r
-        # if current_dist < 0.5:
-        #     final_reward += 1.0
-        self.last_dist = current_dist
-        return final_reward
-    
-    def step(self, action):
-        # action: [vy, vx, vw, arm_ang, catching]
-        action = [action[0], action[1], action[2], 10.0, 1.0]
-        # if self.catch_state < 0.5:
-        #     action[-1] = 1.0
-        # else:
-        #     action[-1] = 0.0
-        action = ActionTuple(np.array([action], dtype=np.float32))
-        action_dict = warp_action(action=action)
-        toal_reward = 0.0
-        for _ in range(1):
-            obs, reward, done, info = self._step(action_dict=action_dict)
-            toal_reward += reward
-            if done:
-                break
-        self.step_num += 1
-        return obs, toal_reward, done, info
 
-    def _step(self, action_dict=None) -> DecisionSteps:
-        all_agents = []
-        for behavior_name in self.env.behavior_specs:  # ['ControlEP?team=0']
-            # add actions
-            for agent_id in self.env.get_steps(behavior_name)[0].agent_id:
-                key = behavior_name + "_{}".format(agent_id)  # 'ControlEP?team=0_0'
-                all_agents.append(key)
-                if action_dict is not None:
-                    self.env.set_action_for_agent(behavior_name, agent_id,
-                                                  action_dict[key])
+    def calculate_reward(self, results: Dict[str, Any]) -> float:
+        """
+        Calculate the reward based on current state and results.
+
+        Includes both sparse reward from Unity and dense reward based on distance change.
+        """
+        sparse_reward = results.reward[AGENT_ID]
+        current_dist = self.calculate_distance_to_mineral(results)
+        distance_reward = self.last_distance - current_dist
+        self.last_distance = current_dist
+
+        return sparse_reward + distance_reward
+
+    def step(self, action: np.ndarray) -> Tuple[Any, float, bool, dict]:
+        """
+        Execute one environment step with given action.
+
+        Args:
+            action: Array of 3 values [vy, vx, vw] for robot control
+
+        Returns:
+            Tuple of (observation, reward, done, info)
+        """
+        # Extend action with fixed arm angle and gripper control
+        full_action = np.array([action[0], action[1], action[2], 10.0, 1.0], dtype=np.float32)
+
+        action_tuple = ActionTuple(np.array([full_action]))
+        obs, reward, done, info = self._step(action_tuple)
+        self.step_count += 1
+
+        return obs, reward, done, info
+
+    def _step(self, action: Optional[ActionTuple] = None) -> Tuple[Any, float, bool, dict]:
+        """Internal step function that handles Unity environment interaction."""
+        if action is not None:
+            self.env.set_action_for_agent(TEAM_NAME, AGENT_ID, action)
         self.env.step()
 
-        decision_result = dict()
-        terminal_result = dict()
-        for behavior_name in self.env.behavior_specs:
-            decision_result[behavior_name], terminal_result[behavior_name] = self.env.get_steps(behavior_name)
+        decision_steps, terminal_steps = self.env.get_steps(TEAM_NAME)
+
+        # Initialize return values
         done = False
-        obs = None
         info = {}
-        reward = 0.0
-        if len(terminal_result[TEAM_NAME]) != 0:
+
+        # Handle terminal state
+        if len(terminal_steps) != 0:
             done = True
-            # info = terminal_result[TEAM_NAME]
-            obs = self.decoder_results(results=terminal_result)
-            reward = self.get_dense_reward(results=terminal_result)
-            self.current_results = terminal_result
-            robot_position = self.get_robot_pose(results=terminal_result)[0]
+            self.current_results = terminal_steps
+            obs = self.decode_observation(terminal_steps)
+            reward = self.calculate_reward(terminal_steps)
+            robot_position = self.get_robot_pose(terminal_steps)[0]
         else:
-            # info = decision_result[behavior_name]
-            obs = self.decoder_results(results=decision_result)
-            reward = self.get_dense_reward(results=decision_result)
-            self.current_results = decision_result
-            robot_position = self.get_robot_pose(results=decision_result)[0]
-        if self.step_num > self.max_episode_length:
+            self.current_results = decision_steps
+            obs = self.decode_observation(decision_steps)
+            reward = self.calculate_reward(decision_steps)
+            robot_position = self.get_robot_pose(decision_steps)[0]
+
+        # Check episode length limit
+        if self.step_count >= self.max_episode_steps:
             done = True
-#         else:
-#             if done:
-#                 reward += 10.0
+
         info["robot_position"] = robot_position
-        
         return obs, reward, done, info
 
 
 def main():
+    """Example usage of the environment."""
     env = EpMineEnv(port=3000)
-    # result = env.step()  # if not, the env won't update
     obs = env.reset()
     done = False
     step = 0
+
     while not done:
-        print(time.time())
+        print(f"Step time: {time.time()}")
         action = env.action_space.sample()
-        # action = [0.0, 5.0, 0.0]
-        # action = [hori, vert, spin, arm_ang, catching]
         obs, reward, done, info = env.step(action)
         position = info["robot_position"]
-        # print(reward)
-        # print(np.array(obs["image"]).shape)
-        cv.imwrite("images/{}-({}, {}).png".format(step, position[0], position[2]), obs)
-        print('----------------------------------------')
+
+        # Save observation image
+        cv.imwrite(f"images/{step}-({position[0]:.2f}, {position[2]:.2f}).png", obs)
+        print("-" * 40)
         step += 1
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()

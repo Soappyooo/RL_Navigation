@@ -25,14 +25,14 @@ def make_env(env_id, rank, seed=0):
 
 if __name__ == "__main__":
     env_id = "EpMineEnv-v0"
-    num_cpu = 2  # Number of processes to use
+    n_envs = 2  # Number of Environments to run in parallel
     # Create the vectorized environment
     # env = SubprocVecEnv([make_env(env_id, i) for i in range(num_cpu)])
 
     # Stable Baselines provides you with make_vec_env() helper
     # which does exactly the previous steps for you.
     # You can choose between `DummyVecEnv` (usually faster) and `SubprocVecEnv`
-    env = make_vec_env(env_id, n_envs=num_cpu, seed=0, vec_env_cls=DummyVecEnv)
+    env = make_vec_env(env_id, n_envs=n_envs, seed=0, vec_env_cls=DummyVecEnv)
     # env = gym.make("EpMineEnv-v0")
     model = PPO("CnnPolicy", env, verbose=1)
     model.learn(total_timesteps=1e6)
