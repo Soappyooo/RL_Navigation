@@ -42,3 +42,4 @@ pip install protobuf~=3.20
 
 ## 1.3 最后：下载仿真环境
 参考原项目[仿真环境下载](https://github.com/DRL-CASIA/EpMineEnv#%E4%BB%BF%E7%9C%9F%E7%8E%AF%E5%A2%83%E4%B8%8B%E8%BD%BD)部分。
+让drl可执行文件（drl.x86_64或drl.exe）在`EpMineEnv-main/envs/SingleAgent/MineField/`目录下。(例如，在Windows下修改下载的`MineField_Windows-0510-random`文件夹名称为`MineField`，并移动到`EpMineEnv-main/envs/SingleAgent/`)

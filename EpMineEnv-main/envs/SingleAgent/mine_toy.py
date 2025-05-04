@@ -8,6 +8,7 @@ import time
 import cv2 as cv
 import gym
 import socket
+from .config import UNITY_ENV_PATH
 
 # Constants for Unity environment configuration
 TEAM_NAME = "ControlEP?team=0"
@@ -51,7 +52,7 @@ class EpMineEnv(gym.Env):
 
     def __init__(
         self,
-        file_name: str = "envs/SingleAgent/MineField_Linux/drl.x86_64",
+        file_name: str = UNITY_ENV_PATH,  # Use the config path by default
         port: Optional[int] = 2000,
         seed: int = 0,
         work_id: int = 0,
@@ -65,7 +66,7 @@ class EpMineEnv(gym.Env):
         Initialize the environment with given parameters.
 
         Args:
-            file_name (str): Path to the Unity executable
+            file_name (str): Path to the Unity executable, defaults to platform-specific path
             port (int, optional): Base port for Unity communication
             seed (int): Random seed for reproducibility
             work_id (int): Worker ID for parallel environments
