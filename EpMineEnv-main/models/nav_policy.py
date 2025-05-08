@@ -1,0 +1,181 @@
+import torch
+import torch.nn as nn
+from .temporal_encoders import TemporalEncoder
+from .backbones import VisualBackbone
+from typing import Dict
+
+
+def rot9d_to_rotmat(x: torch.Tensor) -> torch.Tensor:
+    """
+    Symmetric orthogonalization and build rotation matrix from a 9D vector
+    Args:
+        x: 9D vector of shape (N, 9)
+    Returns:
+        Rotation matrix of shape (N, 3, 3)
+    """
+    assert x.dim() <= 2, "Input tensor must be 1D or 2D"
+    assert x.size(-1) == 9, "Last dimension must be of size 9"
+    m = x.view(-1, 3, 3)
+    u, s, v = torch.svd(m)
+    vt = torch.transpose(v, 1, 2)
+    det = torch.det(torch.matmul(u, vt))
+    det = det.view(-1, 1, 1)
+    vt = torch.cat((vt[:, :2, :], vt[:, -1:, :] * det), 1)
+    r = torch.matmul(u, vt)
+    return r
+
+
+class MLP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        output_dim: int,
+        hidden_dims: tuple = (512,),
+    ):
+        """
+        Initialize the MLP class.
+        This class implements a multi-layer perceptron with SiLU activations.
+
+        Args:
+            input_dim (int): Input dimension of the MLP.
+            output_dim (int): Output dimension of the MLP.
+            hidden_dims (tuple): Tuple of hidden dimensions. Defaults to (512,).
+        """
+        super(MLP, self).__init__()
+        layers = []
+        in_dim = input_dim
+        for h_dim in hidden_dims:
+            layers.append(nn.Linear(in_dim, h_dim))
+            layers.append(nn.SiLU())
+            in_dim = h_dim
+        layers.append(nn.Linear(in_dim, output_dim))
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.model(x)
+
+
+class NavPolicy(nn.Module):
+    def __init__(self, backbone_name: str, encoder_name: str, hidden_dim: int = 512, max_seq_len: int = 8):
+        """
+        Initialize the Navigation Policy class.
+        This class combines a visual backbone, a temporal encoder and several heads.
+        Heads include an actor head (output action), a critic head (output value) and pose estimation head.
+
+        Args:
+            backbone_name (str): Name of the visual backbone architecture.
+            encoder_name (str): Name of the temporal encoder architecture.
+            hidden_dim (int): Hidden dimension of the policy. Defaults to 512.
+            max_seq_len (int): Maximum sequence length for positional encoding. Defaults to 8.
+        """
+        # action space: gym.spaces.Box(
+        #     low=np.array([-10.0, -10.0, -3.0]), high=np.array([10.0, 10.0, 3.0]), shape=(3,), dtype=np.float32
+        # )
+        # observation space: gym.spaces.Dict(
+        #     {
+        #         "image": gym.spaces.Box(low=0, high=1.0, shape=image_shape, dtype=np.float32),
+        #         "state": gym.spaces.Box(low=-np.Inf, high=np.Inf, shape=state_shape, dtype=np.float32),
+        #     }
+        # )
+        super(NavPolicy, self).__init__()
+        self.visual_backbone = VisualBackbone(backbone_name, hidden_dim)
+        self.temporal_encoder = TemporalEncoder(encoder_name, hidden_dim, max_seq_len)
+        self.actor_head = MLP(hidden_dim, 3, (256, 128))
+        self.critic_head = MLP(hidden_dim, 1, (256, 128))
+        self.pose_head = MLP(hidden_dim, 3 + 9, (256, 128))  # 3 for translation, 9 for rotation
+        self.hidden_dim = hidden_dim
+        self.max_seq_len = max_seq_len
+        self.backbone_name = backbone_name
+        self.encoder_name = encoder_name
+        self.action_low = torch.tensor([-10.0, -10.0, -3.0])
+        self.action_high = torch.tensor([10.0, 10.0, 3.0])
+        self.action_scale = (self.action_high - self.action_low) / 2.0
+        self.action_mean = (self.action_high + self.action_low) / 2.0
+
+    def _unnormalize_action(self, normalized_action: torch.Tensor) -> torch.Tensor:
+        """
+        Convert normalized action (from tanh, in [-1,1]) to actual action space
+        """
+        if normalized_action.device != self.action_scale.device:
+            self.action_scale = self.action_scale.to(normalized_action.device)
+            self.action_mean = self.action_mean.to(normalized_action.device)
+
+        return self.action_mean + normalized_action * self.action_scale
+
+    def forward(self, x: Dict[str, torch.Tensor], value_only: bool = False) -> tuple:
+        """
+        Forward pass through the navigation policy.
+        Args:
+            x (Dict[str, torch.Tensor]): Input dictionary containing:
+                - image: tensor of shape (batch_size, seq_len, channels, height, width)
+                - state: tensor of shape (batch_size, seq_len, 12) or None
+            value_only (bool): If True, only compute the value (critic head). Defaults to False.
+        Returns:
+            tuple: Tuple of actor, critic and pose tensors.
+        """
+        # Process image input
+        image = x["image"]
+        if len(image.shape) != 5:
+            raise ValueError(f"Image tensor must be 5D, but got {len(image.shape)}D tensor.")
+        if image.shape[2] != 3:
+            raise ValueError(f"Image tensor must have channels=3, but got {image.shape[2]}.")
+
+        batch_size = image.size(0)
+        seq_len = image.size(1)
+
+        # reshape to (batch_size * seq_len, channels, height, width)
+        image = image.view(batch_size * seq_len, *image.shape[2:])
+
+        # pass through visual backbone
+        feat = self.visual_backbone(image)  # (batch_size * seq_len, hidden_dim)
+
+        # reshape to (batch_size, seq_len, hidden_dim)
+        feat = feat.view(batch_size, seq_len, -1)
+
+        # pass through temporal encoder
+        feat = self.temporal_encoder(feat)  # (batch_size, hidden_dim)
+
+        # pass through critic head
+        value = self.critic_head(feat)  # (batch_size, 1)
+
+        if value_only:
+            return None, value, None
+
+        # pass through actor head
+        action = self.actor_head(feat)  # (batch_size, 3)
+        action = torch.tanh(action)  # normalize to [-1,1]
+        action = self._unnormalize_action(action)  # scale to actual action space
+
+        # pass through pose head
+        pose = self.pose_head(feat)  # (batch_size, 3 + 9)
+
+        # reconstruct pose
+        pose[:, 3:] = rot9d_to_rotmat(pose[:, 3:]).view(-1, 9)
+
+        return action, value, pose
+
+    def predict(self, x: Dict[str, torch.Tensor], seq_len: int = 8, clear_cache: bool = False) -> torch.Tensor:
+        """
+        Predict the action and value given the input.
+        Args:
+            x (Dict[str, torch.Tensor]): Input dictionary containing:
+                - image: tensor of shape (batch_size, channels, height, width)
+                - state: tensor of shape (batch_size, 12) or None
+            seq_len (int): Sequence length for Transformer. Defaults to 8.
+            clear_cache (bool): Whether to clear the cache (e.g. start a new episode). Defaults to False.
+        Returns:
+            torch.Tensor: Predicted action tensor of shape (batch_size, 3).
+        """
+        image = x["image"]
+        if len(image.shape) != 4:
+            raise ValueError(f"Image tensor must be 4D, but got {len(image.shape)}D tensor.")
+        if image.shape[1] != 3:
+            raise ValueError(f"Image tensor must have channels=3, but got {image.shape[1]}.")
+
+        batch_size = image.size(0)
+        feat = self.visual_backbone(image)  # (batch_size, hidden_dim)
+        feat = self.temporal_encoder.infer(feat, seq_len, clear_cache)  # (batch_size, hidden_dim)
+        action = self.actor_head(feat)
+        action = torch.tanh(action)  # normalize to [-1,1]
+        action = self._unnormalize_action(action)  # scale to actual action space
+        return action

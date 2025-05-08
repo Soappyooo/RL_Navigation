@@ -3,18 +3,25 @@ from mlagents_envs.side_channel.engine_configuration_channel import EngineConfig
 from mlagents_envs.side_channel.environment_parameters_channel import EnvironmentParametersChannel
 from mlagents_envs.base_env import ActionTuple, DecisionSteps
 import numpy as np
-from typing import Optional, Tuple, Dict, Any
+from typing import Optional, Tuple, Dict, Any, List, Deque
 import time
 import cv2 as cv
 import gym
 import socket
+from collections import deque
 from .config import UNITY_ENV_PATH
+from models.backbones import VisualBackbone
 
 # Constants for Unity environment configuration
 TEAM_NAME = "ControlEP?team=0"
 AGENT_ID = 0
-DEFAULT_IMAGE_SIZE = (128, 128, 3)
-DEFAULT_STATE_SIZE = 7
+IMAGE_BACKBONE_MODE = "vint"
+
+if IMAGE_BACKBONE_MODE == "vint":
+    DEFAULT_IMAGE_SIZE = (3, 64, 85)  # CHW format after preprocessing
+else:
+    DEFAULT_IMAGE_SIZE = (3, 128, 128)
+DEFAULT_STATE_SIZE = 3 + 9  # 3 for translation, 9 for rotation matrix
 
 
 def check_port_availability(port: int, host: str = "127.0.0.1") -> bool:
@@ -37,9 +44,32 @@ def check_port_availability(port: int, host: str = "127.0.0.1") -> bool:
         elif result == 111:
             print(f"Port {port} is available on {host}")
             return True
+        elif result == 10035:
+            print(f"Port {port} is available on {host}")
+            return True
         else:
             print(f"Port check failed with error code: {result}")
             return False
+
+
+def quat_to_rotmat(quat: np.ndarray) -> np.ndarray:
+    """
+    Convert quaternion to rotation matrix.
+
+    Args:
+        quat (np.ndarray): Quaternion [x, y, z, w]
+
+    Returns:
+        np.ndarray: Rotation matrix of shape (3, 3)
+    """
+    x, y, z, w = quat
+    return np.array(
+        [
+            [1 - 2 * (y**2 + z**2), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+            [2 * (x * y + z * w), 1 - 2 * (x**2 + z**2), 2 * (y * z - x * w)],
+            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x**2 + y**2)],
+        ]
+    )
 
 
 class EpMineEnv(gym.Env):
@@ -56,11 +86,12 @@ class EpMineEnv(gym.Env):
         port: Optional[int] = 2000,
         seed: int = 0,
         work_id: int = 0,
-        time_scale: float = 10,
+        time_scale: float = 100,
         max_episode_steps: int = 1000,
-        only_image: bool = True,
+        only_image: bool = False,
         only_state: bool = False,
         no_graphics: bool = False,
+        history_length: int = 8,
     ):
         """
         Initialize the environment with given parameters.
@@ -75,6 +106,7 @@ class EpMineEnv(gym.Env):
             only_image (bool): If True, observation space only includes image
             only_state (bool): If True, observation space only includes state vector
             no_graphics (bool): If True, runs Unity environment without graphics
+            history_length (int): Number of frames to stack in history
         """
         # Initialize Unity channels
         self.engine_config_channel = EngineConfigurationChannel()
@@ -91,6 +123,7 @@ class EpMineEnv(gym.Env):
         self.seed_value = seed
         self.no_graphics = no_graphics
         self.max_episode_steps = max_episode_steps
+        self.history_length = history_length
 
         # Observation type flags
         self.only_image = only_image
@@ -102,18 +135,22 @@ class EpMineEnv(gym.Env):
         self.current_results = None
         self.gripper_state = 0
 
-    @property
-    def observation_space(self) -> gym.spaces.Space:
-        """Define the observation space structure based on configuration."""
-        state_space = gym.spaces.Box(low=-np.Inf, high=np.Inf, shape=(DEFAULT_STATE_SIZE,), dtype=np.float32)
+        # Initialize observation history
+        self.image_history: Deque = deque(maxlen=history_length)
+        self.state_history: Deque = deque(maxlen=history_length)
 
-        if self.only_image:
-            return gym.spaces.Box(low=0, high=255, shape=DEFAULT_IMAGE_SIZE, dtype=np.uint8)
-        elif self.only_state:
-            return state_space
+    @property
+    def observation_space(self) -> gym.spaces.Dict:
+        """Define the observation space structure."""
+        # Image space now includes history dimension
+        image_shape = (self.history_length,) + DEFAULT_IMAGE_SIZE
+        state_shape = (self.history_length, DEFAULT_STATE_SIZE)
 
         return gym.spaces.Dict(
-            {"image": gym.spaces.Box(low=0, high=255, shape=DEFAULT_IMAGE_SIZE, dtype=np.uint8), "state": state_space}
+            {
+                "image": gym.spaces.Box(low=0, high=1.0, shape=image_shape, dtype=np.float32),
+                "state": gym.spaces.Box(low=-np.Inf, high=np.Inf, shape=state_shape, dtype=np.float32),
+            }
         )
 
     @property
@@ -122,6 +159,19 @@ class EpMineEnv(gym.Env):
         return gym.spaces.Box(
             low=np.array([-10.0, -10.0, -3.0]), high=np.array([10.0, 10.0, 3.0]), shape=(3,), dtype=np.float32
         )
+        
+    def seed(self, seed: Optional[int] = None) -> None:
+        """
+        Set the random seed for the environment.
+
+        Args:
+            seed (int, optional): Random seed for reproducibility
+        """
+        if seed is not None:
+            self.seed_value = seed
+        if self.env is not None:
+            self.env.set_seed(seed)
+        self.work_id = seed if seed is not None else self.work_id
 
     def initialize_environment(self, seed: Optional[int] = None) -> None:
         """
@@ -144,6 +194,7 @@ class EpMineEnv(gym.Env):
             worker_id=worker_id,
             side_channels=[self.env_param_channel, self.engine_config_channel],
             no_graphics=self.no_graphics,
+            timeout_wait=10,
         )
 
     def decode_observation(self, results: Dict[str, Any]) -> Dict[str, Any]:
@@ -154,28 +205,44 @@ class EpMineEnv(gym.Env):
             results: Raw results from Unity environment
 
         Returns:
-            Processed observation dictionary
+            Processed observation dictionary with history
         """
         obs = results.obs
-        # Process image observation
-        image = cv.cvtColor(np.array(obs[0][AGENT_ID] * 255, dtype=np.uint8), cv.COLOR_RGB2BGR)
+        # Process image observation (uint8 -> float32, normalized)
+        image = np.array(obs[0][AGENT_ID] * 255, dtype=np.uint8)
+
+        image = VisualBackbone.preprocess_image(image, mode=IMAGE_BACKBONE_MODE)  # Returns CHW format
 
         # Extract state information
         state = obs[1][AGENT_ID]
         self.gripper_state = state[8]  # Update gripper state
+        state_with_rotmat = np.concatenate((state[4:7], quat_to_rotmat(state[0:4]).flatten()), axis=0)  # (3 + 9)
 
+        # Add current observation to history
+        self.image_history.append(image)
+        self.state_history.append(state_with_rotmat)
+
+        # If history is not full, repeat the first observation
+        while len(self.image_history) < self.history_length:
+            self.image_history.append(image)
+            self.state_history.append(state_with_rotmat)
+
+        # Stack history into arrays
+        image_stack = np.stack(list(self.image_history), axis=0)
+        state_stack = np.stack(list(self.state_history), axis=0)
+
+        # Return observation dict with history
         if self.only_image:
-            return image
+            return {"image": image_stack, "state": np.zeros_like(state_stack)}
         elif self.only_state:
-            return np.array(state[:7])
-
-        return {"image": image, "state": state}
+            return {"image": np.zeros_like(image_stack), "state": state_stack}
+        return {"image": image_stack, "state": state_stack}
 
     def get_robot_pose(self, results: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
         """Extract robot position and rotation from results."""
         obs = results.obs
         position = obs[1][AGENT_ID][4:7]
-        rotation = obs[1][AGENT_ID][0:4]
+        rotation = quat_to_rotmat(obs[1][AGENT_ID][0:4])
         return position, rotation
 
     def get_mineral_pose(self, results: Dict[str, Any]) -> np.ndarray:
@@ -194,6 +261,9 @@ class EpMineEnv(gym.Env):
         if self.env is None:
             self.initialize_environment(self.seed_value)
 
+        # Clear history
+        self.image_history.clear()
+        self.state_history.clear()
         self.step_count = 0
         self.env.reset()
         obs, _, _, _ = self._step()
@@ -213,7 +283,7 @@ class EpMineEnv(gym.Env):
 
         return sparse_reward + distance_reward
 
-    def step(self, action: np.ndarray) -> Tuple[Any, float, bool, dict]:
+    def step(self, action: np.ndarray) -> Tuple[Dict[str, Any], float, bool, dict]:
         """
         Execute one environment step with given action.
 
@@ -230,7 +300,8 @@ class EpMineEnv(gym.Env):
         obs, reward, done, info = self._step(action_tuple)
         self.step_count += 1
 
-        return obs, reward, done, info
+        # No need to include robot pose in info since it's in observation
+        return obs, reward, done, {}
 
     def _step(self, action: Optional[ActionTuple] = None) -> Tuple[Any, float, bool, dict]:
         """Internal step function that handles Unity environment interaction."""
@@ -248,20 +319,19 @@ class EpMineEnv(gym.Env):
         if len(terminal_steps) != 0:
             done = True
             self.current_results = terminal_steps
-            obs = self.decode_observation(terminal_steps)
-            reward = self.calculate_reward(terminal_steps)
-            robot_position = self.get_robot_pose(terminal_steps)[0]
         else:
             self.current_results = decision_steps
-            obs = self.decode_observation(decision_steps)
-            reward = self.calculate_reward(decision_steps)
-            robot_position = self.get_robot_pose(decision_steps)[0]
+        obs = self.decode_observation(self.current_results)
+        reward = self.calculate_reward(self.current_results)
+        # robot_position = self.get_robot_pose(self.current_results)[0]
+        robot_position, robot_rotation = self.get_robot_pose(self.current_results)
 
         # Check episode length limit
         if self.step_count >= self.max_episode_steps:
             done = True
 
         info["robot_position"] = robot_position
+        info["robot_rotation"] = robot_rotation
         return obs, reward, done, info
 
 
@@ -272,15 +342,19 @@ def main():
     done = False
     step = 0
 
+    last_time = time.perf_counter()
     while not done:
-        print(f"Step time: {time.time()}")
-        action = env.action_space.sample()
+        current_time = time.perf_counter()
+        elapsed_time = current_time - last_time
+        print(f"Elapsed time: {elapsed_time:.2f} seconds")
+        last_time = current_time
+
+        # action = env.action_space.sample()
+        action = np.array([0.0, 0.0, 0.1], dtype=np.float32)
         obs, reward, done, info = env.step(action)
         position = info["robot_position"]
-
-        # Save observation image
-        cv.imwrite(f"images/{step}-({position[0]:.2f}, {position[2]:.2f}).png", obs)
-        print("-" * 40)
+        rotation = info["robot_rotation"]
+        print(f"Step: {step}, Action: {action}, Reward: {reward}, Position: {position}, Rotation: {rotation}")
         step += 1
 
 
