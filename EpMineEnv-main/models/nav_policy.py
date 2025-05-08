@@ -56,7 +56,14 @@ class MLP(nn.Module):
 
 
 class NavPolicy(nn.Module):
-    def __init__(self, backbone_name: str, encoder_name: str, hidden_dim: int = 512, max_seq_len: int = 8):
+    def __init__(
+        self,
+        backbone_name: str,
+        encoder_name: str,
+        hidden_dim: int = 512,
+        head_hidden_dims: tuple = (256, 128),
+        max_seq_len: int = 8,
+    ):
         """
         Initialize the Navigation Policy class.
         This class combines a visual backbone, a temporal encoder and several heads.
@@ -66,6 +73,7 @@ class NavPolicy(nn.Module):
             backbone_name (str): Name of the visual backbone architecture.
             encoder_name (str): Name of the temporal encoder architecture.
             hidden_dim (int): Hidden dimension of the policy. Defaults to 512.
+            head_hidden_dims (tuple): Tuple of hidden dimensions for the heads. Defaults to (256, 128).
             max_seq_len (int): Maximum sequence length for positional encoding. Defaults to 8.
         """
         # action space: gym.spaces.Box(
@@ -80,10 +88,11 @@ class NavPolicy(nn.Module):
         super(NavPolicy, self).__init__()
         self.visual_backbone = VisualBackbone(backbone_name, hidden_dim)
         self.temporal_encoder = TemporalEncoder(encoder_name, hidden_dim, max_seq_len)
-        self.actor_head = MLP(hidden_dim, 3, (256, 128))
-        self.critic_head = MLP(hidden_dim, 1, (256, 128))
-        self.pose_head = MLP(hidden_dim, 3 + 9, (256, 128))  # 3 for translation, 9 for rotation
+        self.actor_head = MLP(hidden_dim, 3, head_hidden_dims)
+        self.critic_head = MLP(hidden_dim, 1, head_hidden_dims)
+        self.pose_head = MLP(hidden_dim, 3 + 9, head_hidden_dims)
         self.hidden_dim = hidden_dim
+        self.head_hidden_dims = head_hidden_dims
         self.max_seq_len = max_seq_len
         self.backbone_name = backbone_name
         self.encoder_name = encoder_name
@@ -102,14 +111,22 @@ class NavPolicy(nn.Module):
 
         return self.action_mean + normalized_action * self.action_scale
 
-    def forward(self, x: Dict[str, torch.Tensor], value_only: bool = False) -> tuple:
+    def forward(
+        self,
+        x: Dict[str, torch.Tensor],
+        output_value: bool = True,
+        output_pose: bool = True,
+        output_action: bool = True,
+    ) -> tuple:
         """
         Forward pass through the navigation policy.
         Args:
             x (Dict[str, torch.Tensor]): Input dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
                 - state: tensor of shape (batch_size, seq_len, 12) or None
-            value_only (bool): If True, only compute the value (critic head). Defaults to False.
+            output_value (bool): If True, compute the value (critic head). Defaults to True.
+            output_pose (bool): If True, compute the pose (pose head). Defaults to True.
+            output_action (bool): If True, compute the action (actor head). Defaults to True.
         Returns:
             tuple: Tuple of actor, critic and pose tensors.
         """
@@ -136,21 +153,27 @@ class NavPolicy(nn.Module):
         feat = self.temporal_encoder(feat)  # (batch_size, hidden_dim)
 
         # pass through critic head
-        value = self.critic_head(feat)  # (batch_size, 1)
-
-        if value_only:
-            return None, value, None
+        if output_value:
+            value = self.critic_head(feat)  # (batch_size, 1)
+        else:
+            value = None
 
         # pass through actor head
-        action = self.actor_head(feat)  # (batch_size, 3)
-        action = torch.tanh(action)  # normalize to [-1,1]
-        action = self._unnormalize_action(action)  # scale to actual action space
+        if output_action:
+            action = self.actor_head(feat)  # (batch_size, 3)
+            action = torch.tanh(action)  # normalize to [-1,1]
+            action = self._unnormalize_action(action)  # scale to actual action space
+        else:
+            action = None
 
         # pass through pose head
-        pose = self.pose_head(feat)  # (batch_size, 3 + 9)
+        if output_pose:
+            pose = self.pose_head(feat)  # (batch_size, 3 + 9)
 
-        # reconstruct pose
-        pose[:, 3:] = rot9d_to_rotmat(pose[:, 3:]).view(-1, 9)
+            # svd not implemented for AMP (half precision)
+            # pose[:, 3:] = rot9d_to_rotmat(pose[:, 3:]).view(-1, 9)  # reconstruct rotation matrix
+        else:
+            pose = None
 
         return action, value, pose
 

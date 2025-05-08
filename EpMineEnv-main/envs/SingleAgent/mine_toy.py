@@ -92,6 +92,7 @@ class EpMineEnv(gym.Env):
         only_state: bool = False,
         no_graphics: bool = False,
         history_length: int = 8,
+        image_preprocess_mode: str = IMAGE_BACKBONE_MODE,
     ):
         """
         Initialize the environment with given parameters.
@@ -107,6 +108,7 @@ class EpMineEnv(gym.Env):
             only_state (bool): If True, observation space only includes state vector
             no_graphics (bool): If True, runs Unity environment without graphics
             history_length (int): Number of frames to stack in history
+            image_preprocess_mode (str): Preprocessing mode for images
         """
         # Initialize Unity channels
         self.engine_config_channel = EngineConfigurationChannel()
@@ -124,6 +126,7 @@ class EpMineEnv(gym.Env):
         self.no_graphics = no_graphics
         self.max_episode_steps = max_episode_steps
         self.history_length = history_length
+        self.image_preprocess_mode = image_preprocess_mode
 
         # Observation type flags
         self.only_image = only_image
@@ -159,7 +162,7 @@ class EpMineEnv(gym.Env):
         return gym.spaces.Box(
             low=np.array([-10.0, -10.0, -3.0]), high=np.array([10.0, 10.0, 3.0]), shape=(3,), dtype=np.float32
         )
-        
+
     def seed(self, seed: Optional[int] = None) -> None:
         """
         Set the random seed for the environment.
@@ -194,7 +197,7 @@ class EpMineEnv(gym.Env):
             worker_id=worker_id,
             side_channels=[self.env_param_channel, self.engine_config_channel],
             no_graphics=self.no_graphics,
-            timeout_wait=10,
+            timeout_wait=60,
         )
 
     def decode_observation(self, results: Dict[str, Any]) -> Dict[str, Any]:
@@ -211,7 +214,7 @@ class EpMineEnv(gym.Env):
         # Process image observation (uint8 -> float32, normalized)
         image = np.array(obs[0][AGENT_ID] * 255, dtype=np.uint8)
 
-        image = VisualBackbone.preprocess_image(image, mode=IMAGE_BACKBONE_MODE)  # Returns CHW format
+        image = VisualBackbone.preprocess_image(image, mode=self.image_preprocess_mode)  # Returns CHW format
 
         # Extract state information
         state = obs[1][AGENT_ID]

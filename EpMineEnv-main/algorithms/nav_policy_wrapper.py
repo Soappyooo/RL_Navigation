@@ -22,16 +22,33 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         backbone_name: str = "efficientnet",
         encoder_name: str = "transformer",
         hidden_dim: int = 512,
+        head_hidden_dims: Tuple[int] = (256, 128),
         max_seq_len: int = 8,
         from_pretrained: bool = False,
         pretrained_backbone_path: Optional[Path] = None,
         **kwargs,
     ):
+        """
+        Initialize the NavActorCriticPolicy.
+        Args:
+            observation_space: The observation space of the environment.
+            action_space: The action space of the environment.
+            lr_schedule: Learning rate schedule.
+            backbone_name: Name of the visual backbone architecture.
+            encoder_name: Name of the temporal encoder architecture.
+            hidden_dim: Hidden dimension of the policy.
+            head_hidden_dims: Tuple of hidden dimensions for the heads.
+            max_seq_len: Maximum sequence length for positional encoding.
+            from_pretrained: Whether to load a pretrained backbone.
+            pretrained_backbone_path: Path to the pretrained backbone weights.
+            **kwargs: Additional arguments for the parent class.
+        """
         self.nav_policy: NavPolicy = None
         self.max_seq_len = max_seq_len
         self.backbone_name = backbone_name
         self.encoder_name = encoder_name
         self.hidden_dim = hidden_dim
+        self.head_hidden_dims = head_hidden_dims
         self.action_dim = action_space.shape[0]
         self.from_pretrained = from_pretrained
         self.pretrained_backbone_path = pretrained_backbone_path
@@ -67,7 +84,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Returns:
             actions, values, log_probs
         """
-        actions, values, pose = self.nav_policy(obs)
+        actions, values, _ = self.nav_policy(obs, output_pose=False)
         distribution = self._get_action_dist_from_latent(actions)
 
         if deterministic:
@@ -100,7 +117,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
 
         # For Diagonal Gaussian, we need to sum the log_probs across action dimensions
         log_prob = distribution.log_prob(actions).sum(dim=-1)  # Sum log_probs to get joint probability
-        entropy = distribution.entropy()
+        entropy = distribution.entropy().sum(dim=-1)  # Sum entropy across action dimensions
 
         return values, log_prob, entropy, pose_pred
 
@@ -116,7 +133,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Returns:
             values: Tensor of shape (batch_size,)
         """
-        _, values, _ = self.nav_policy(obs, value_only=True)
+        _, values, _ = self.nav_policy(obs, output_action=False, output_pose=False)
         return values
 
     def _get_action_dist_from_latent(self, latent_pi: th.Tensor) -> th.distributions.Distribution:
@@ -144,6 +161,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             backbone_name=self.backbone_name,
             encoder_name=self.encoder_name,
             hidden_dim=self.hidden_dim,
+            head_hidden_dims=self.head_hidden_dims,
             max_seq_len=self.max_seq_len,
         ).to(self.device)
 
@@ -163,7 +181,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
     def predict(
         self,
         observation: Dict[str, th.Tensor],
-        clear_cache: bool = True,
+        clear_cache: bool = False,
         deterministic: bool = False,
     ) -> np.ndarray:
         """
@@ -179,28 +197,32 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Returns:
             the model's action
         """
-        # Convert observation to tensor
-        obs = th.as_tensor(observation["image"]).float().to(self.device)
-        # add batch dimension if needed
-        if obs.dim() == 3:
-            obs = obs.unsqueeze(0)
-        # check if obs is 4D
-        if obs.dim() != 4:
-            raise ValueError(f"Image tensor must be 4D, but got {obs.dim()}D tensor.")
-        # check if obs is 3 channels
-        if obs.shape[1] != 3:
-            raise ValueError(f"Image tensor must have channels=3, but got {obs.shape[1]}.")
+        with th.no_grad():
+            # Convert observation to tensor
+            obs = th.as_tensor(observation["image"]).float().to(self.device)
+            # add batch dimension if needed
+            if obs.dim() == 3:
+                obs = obs.unsqueeze(0)
+            # check if obs is 4D
+            if obs.dim() != 4:
+                if obs.dim() == 5:  # (batch_size, seq_len, channels, height, width)
+                    obs = obs[0, -1, :, :, :].unsqueeze(0)  # take the last frame
+                else:
+                    raise ValueError(f"Image tensor must be 4D, but got {obs.dim()}D tensor.")
+            # check if obs is 3 channels
+            if obs.shape[1] != 3:
+                raise ValueError(f"Image tensor must have channels=3, but got {obs.shape[1]}.")
 
-        actions = self.nav_policy.predict(
-            {"image": obs, "state": None},
-            seq_len=self.max_seq_len,
-            clear_cache=clear_cache,
-        )
-        distribution = self._get_action_dist_from_latent(actions)
+            actions = self.nav_policy.predict(
+                {"image": obs, "state": None},
+                seq_len=self.max_seq_len,
+                clear_cache=clear_cache,
+            )
+            distribution = self._get_action_dist_from_latent(actions)
 
-        if deterministic:
-            actions = distribution.mode()
-        else:
-            actions = distribution.sample()
+            if deterministic:
+                actions = distribution.mean
+            else:
+                actions = distribution.sample()
 
-        return actions.view(-1).cpu().numpy()
+        return actions.numpy(force=True)  # [1, action_dim]

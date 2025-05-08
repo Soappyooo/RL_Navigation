@@ -1,10 +1,13 @@
 import warnings
 from typing import Any, Dict, Optional, Type, Union
+import contextlib
 
 import numpy as np
 import torch as th
+import torch.amp
 from gym import spaces
 from torch.nn import functional as F
+from tqdm import tqdm
 
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
 from stable_baselines3.common.policies import ActorCriticPolicy
@@ -94,9 +97,12 @@ class CustomPPO(OnPolicyAlgorithm):
         verbose: int = 0,
         seed: Optional[int] = None,
         device: Union[th.device, str] = "auto",
+        use_amp: bool = False,  # Added AMP support
         _init_setup_model: bool = True,
     ):
-        self.pose_coef = pose_coef  # Store pose coefficient
+        self.pose_coef = pose_coef
+        self.use_amp = use_amp
+        self.scaler = torch.amp.GradScaler() if use_amp else None
 
         super(CustomPPO, self).__init__(
             policy,
@@ -192,11 +198,20 @@ class CustomPPO(OnPolicyAlgorithm):
 
         continue_training = True
 
+        # Calculate total number of rollout batches based on n_steps and batch size
+        total_samples = self.n_steps * self.n_envs
+        total_rollout_batches = total_samples // self.batch_size
+
         # train for n_epochs epochs
-        for epoch in range(self.n_epochs):
+        for epoch in tqdm(range(self.n_epochs), desc="Training epochs", leave=False):
             approx_kl_divs = []
-            # Do a complete pass on the rollout buffer
-            for rollout_data in self.rollout_buffer.get(self.batch_size):
+            # Do a complete pass on the rollout buffer with progress bar
+            for rollout_data in tqdm(
+                self.rollout_buffer.get(self.batch_size),
+                desc=f"Epoch {epoch+1}/{self.n_epochs} - {total_samples} samples",
+                total=total_rollout_batches,
+                leave=False,
+            ):
                 actions = rollout_data.actions
                 if isinstance(self.action_space, spaces.Discrete):
                     # Convert discrete action from float to long
@@ -206,84 +221,101 @@ class CustomPPO(OnPolicyAlgorithm):
                 if self.use_sde:
                     self.policy.reset_noise(self.batch_size)
 
-                values, log_prob, entropy, pose_pred = self.policy.evaluate_actions(rollout_data.observations, actions)
-                values = values.flatten()
+                # Use AMP context if enabled
+                with torch.amp.autocast(device_type="cuda") if self.use_amp else contextlib.nullcontext():
+                    values, log_prob, entropy, pose_pred = self.policy.evaluate_actions(
+                        rollout_data.observations, actions
+                    )  # [batch_size, 1], [batch_size], [batch_size], [batch_size, 12]
+                    values = values.flatten()  # [batch_size]
 
-                # Get true pose from observations
-                if rollout_data.observations["state"] is not None:
-                    # Use the last state in sequence as ground truth
-                    true_pose = rollout_data.observations["state"][:, -1]
-                    # Calculate pose loss (MSE)
-                    pose_loss = F.mse_loss(pose_pred, true_pose)
-                    pose_losses.append(pose_loss.item())
-                else:
-                    # If no state available, don't calculate pose loss
-                    pose_loss = th.tensor(0.0, device=self.device)
-                    pose_losses.append(0.0)
+                    # Get true pose from observations
+                    # if state is not available, it should be all zeros
+                    if rollout_data.observations["state"].sum().item() != 0:
+                        # Use the last state in sequence as ground truth
+                        true_pose = rollout_data.observations["state"][:, -1]
+                        # Calculate pose loss (MSE)
+                        pose_loss = F.mse_loss(pose_pred, true_pose)
+                        pose_losses.append(pose_loss.item())
+                    else:
+                        # If no state available, don't calculate pose loss
+                        pose_loss = th.tensor(0.0, device=self.device)
+                        pose_losses.append(0.0)
 
-                # Normalize advantage
-                advantages = rollout_data.advantages
-                if self.normalize_advantage:
-                    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+                    # Normalize advantage
+                    advantages = rollout_data.advantages
+                    if self.normalize_advantage:
+                        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-                # ratio between old and new policy, should be one at the first iteration
-                ratio = th.exp(log_prob - rollout_data.old_log_prob)
+                    # ratio between old and new policy, should be one at the first iteration
+                    ratio = th.exp(log_prob - rollout_data.old_log_prob)
 
-                # clipped surrogate loss
-                policy_loss_1 = advantages * ratio
-                policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
-                policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
+                    # clipped surrogate loss
+                    policy_loss_1 = advantages * ratio
+                    policy_loss_2 = advantages * th.clamp(ratio, 1 - clip_range, 1 + clip_range)
+                    policy_loss = -th.min(policy_loss_1, policy_loss_2).mean()
 
-                # Logging
-                pg_losses.append(policy_loss.item())
-                clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
-                clip_fractions.append(clip_fraction)
+                    # Logging
+                    pg_losses.append(policy_loss.item())
+                    clip_fraction = th.mean((th.abs(ratio - 1) > clip_range).float()).item()
+                    clip_fractions.append(clip_fraction)
 
-                if self.clip_range_vf is None:
-                    # No clipping
-                    values_pred = values
-                else:
-                    # Clip the different between old and new value
-                    # NOTE: this depends on the reward scaling
-                    values_pred = rollout_data.old_values + th.clamp(
-                        values - rollout_data.old_values, -clip_range_vf, clip_range_vf
+                    if self.clip_range_vf is None:
+                        # No clipping
+                        values_pred = values
+                    else:
+                        # Clip the different between old and new value
+                        values_pred = rollout_data.old_values + th.clamp(
+                            values - rollout_data.old_values, -clip_range_vf, clip_range_vf
+                        )
+                    # Value loss using the TD(gae_lambda) target
+                    value_loss = F.mse_loss(rollout_data.returns, values_pred)
+                    value_losses.append(value_loss.item())
+
+                    # Entropy loss favor exploration
+                    if entropy is None:
+                        # Approximate entropy when no analytical form
+                        entropy_loss = -th.mean(-log_prob)
+                    else:
+                        entropy_loss = -th.mean(entropy)
+
+                    entropy_losses.append(entropy_loss.item())
+
+                    # Combine all losses
+                    loss = (
+                        policy_loss
+                        + self.ent_coef * entropy_loss
+                        + self.vf_coef * value_loss
+                        + self.pose_coef * pose_loss
                     )
-                # Value loss using the TD(gae_lambda) target
-                value_loss = F.mse_loss(rollout_data.returns, values_pred)
-                value_losses.append(value_loss.item())
 
-                # Entropy loss favor exploration
-                if entropy is None:
-                    # Approximate entropy when no analytical form
-                    entropy_loss = -th.mean(-log_prob)
-                else:
-                    entropy_loss = -th.mean(entropy)
+                    # Calculate approximate form of reverse KL Divergence for early stopping
+                    # with th.no_grad():
+                    #     log_ratio = log_prob - rollout_data.old_log_prob
+                    #     approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                    #     approx_kl_divs.append(approx_kl_div)
 
-                entropy_losses.append(entropy_loss.item())
+                    # if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                    #     continue_training = False
+                    #     if self.verbose >= 1:
+                    #         print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
+                    #     break
 
-                # Combine all losses
-                loss = (
-                    policy_loss + self.ent_coef * entropy_loss + self.vf_coef * value_loss + self.pose_coef * pose_loss
-                )
-
-                # Calculate approximate form of reverse KL Divergence for early stopping
-                with th.no_grad():
-                    log_ratio = log_prob - rollout_data.old_log_prob
-                    approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
-                    approx_kl_divs.append(approx_kl_div)
-
-                if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                    continue_training = False
-                    if self.verbose >= 1:
-                        print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
-                    break
-
-                # Optimization step
+                # Optimization step with AMP support
                 self.policy.optimizer.zero_grad()
-                loss.backward()
-                # Clip grad norm
-                th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
-                self.policy.optimizer.step()
+                if self.use_amp:
+                    # Use GradScaler for AMP
+                    self.scaler.scale(loss).backward()
+                    self.scaler.unscale_(self.policy.optimizer)
+                    # Clip grad norm
+                    th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.scaler.step(self.policy.optimizer)
+                    self.scaler.update()
+                else:
+                    # Standard optimization
+                    loss.backward()
+                    # Clip grad norm
+                    th.nn.utils.clip_grad_norm_(self.policy.parameters(), self.max_grad_norm)
+                    self.policy.optimizer.step()
 
             if not continue_training:
                 break
@@ -336,8 +368,10 @@ class CustomPPO(OnPolicyAlgorithm):
     def predict(
         self,
         observation: Dict[str, th.Tensor],
-        clear_cache: bool = True,
+        clear_cache: bool = False,
         deterministic: bool = False,
+        episode_start: np.ndarray = None,
+        **kwargs: Any,
     ) -> np.ndarray:
         """
         Get the policy action from an observation.
@@ -348,8 +382,12 @@ class CustomPPO(OnPolicyAlgorithm):
                 - state: tensor of shape (12) or None
             clear_cache: Whether to clear the cache (e.g. start a new episode).
             deterministic: Whether or not to return deterministic actions.
+            episode_start: If True, start a new episode (used for recurrent policies).
 
         Returns:
-            the model's action
+            the model's action, and thing not used here
         """
-        return self.policy.predict(observation, deterministic=deterministic, clear_cache=clear_cache)
+        if episode_start is not None:
+            if np.any(episode_start):
+                clear_cache = True
+        return self.policy.predict(observation, deterministic=deterministic, clear_cache=clear_cache), None
