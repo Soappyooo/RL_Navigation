@@ -9,7 +9,10 @@ import cv2 as cv
 import gym
 import socket
 from collections import deque
+
 from pynput import keyboard
+import atexit
+
 from .config import UNITY_ENV_PATH
 from models.backbones import VisualBackbone
 
@@ -22,7 +25,9 @@ if IMAGE_BACKBONE_MODE == "vint":
     DEFAULT_IMAGE_SIZE = (3, 64, 85)  # CHW format after preprocessing
 else:
     DEFAULT_IMAGE_SIZE = (3, 128, 128)
-DEFAULT_STATE_SIZE = 3 + 9  # 3 for translation, 9 for rotation matrix
+# DEFAULT_STATE_SIZE = 3 + 9  # 3 for translation, 9 for rotation matrix
+DEFAULT_STATE_SIZE = 2  # 2 for x-y translation only
+DEBUG = False
 
 # Global key state dictionary to track pressed keys
 key_states = {
@@ -59,11 +64,6 @@ def on_release(key):
             key_states[k] = False
     except AttributeError:
         pass
-
-
-# Setup keyboard listener
-listener = keyboard.Listener(on_press=on_press, on_release=on_release)
-listener.start()
 
 
 def get_action_from_keyboard() -> Tuple[float, float, float]:
@@ -107,10 +107,6 @@ def get_action_from_keyboard() -> Tuple[float, float, float]:
     return action_y, action_x, action_w
 
 
-# Clean up keyboard listener when program exits
-import atexit
-
-
 def exit_handler():
     """
     Stop the keyboard listener when the program exits
@@ -119,7 +115,11 @@ def exit_handler():
         listener.stop()
 
 
-atexit.register(exit_handler)
+# Setup keyboard listener
+if DEBUG:
+    listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+    listener.start()
+    atexit.register(exit_handler)
 
 
 def check_port_availability(port: int, host: str = "127.0.0.1") -> bool:
@@ -325,16 +325,23 @@ class EpMineEnv(gym.Env):
         # Extract state information
         state = obs[1][AGENT_ID]
         self.gripper_state = state[8]  # Update gripper state
-        state_with_rotmat = np.concatenate((state[4:7], quat_to_rotmat(state[0:4]).flatten()), axis=0)  # (3 + 9)
+        # state_with_rotmat = np.concatenate((state[4:7], quat_to_rotmat(state[0:4]).flatten()), axis=0)  # (3 + 9)
+        trans, rotmat = self.get_robot_pose(results)
+
+        # get translation of world frame in robot frame = -R^T @ t
+        trans_world = -rotmat.T @ trans  # (3,)
+        # state_with_rotmat = np.concatenate((trans, rotmat.flatten()), axis=0)  # (3 + 9)
 
         # Add current observation to history
         self.image_buffer.append(image)
-        self.state_buffer.append(state_with_rotmat)
+        # self.state_buffer.append(state_with_rotmat)
+        self.state_buffer.append(trans_world[:2])  # Only keep x and y (right-handed)
 
         # If history is not full, repeat the first observation
         while len(self.image_buffer) < self.history_length * self.obs_interval:
             self.image_buffer.append(image)
-            self.state_buffer.append(state_with_rotmat)
+            # self.state_buffer.append(state_with_rotmat)
+            self.state_buffer.append(trans_world[:2])  # Only keep x and y (right-handed)
 
         # Extract observations with the specified interval
         # We need to get the most recent observation and then go back by interval steps
@@ -366,11 +373,37 @@ class EpMineEnv(gym.Env):
         return {"image": image_stack, "state": state_stack}
 
     def get_robot_pose(self, results: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
-        """Extract robot position and rotation from results."""
+        """
+        Extract robot position and rotation from results.
+        Note that original result is left-handed, we need to convert it to right-handed.
+        Convert from left-handed (right, up, front) to right-handed (right, front, up).
+        """
         obs = results.obs
-        position = obs[1][AGENT_ID][4:7]
-        rotation = quat_to_rotmat(obs[1][AGENT_ID][0:4])
-        return position, rotation
+        left_handed_position = obs[1][AGENT_ID][4:7]  # x, y, z for right, up and front
+
+        # Convert position: [x, y, z] -> [x, z, y] (right, up, front -> right, front, up)
+        right_handed_position = np.array(
+            [
+                left_handed_position[0],  # x (right) remains the same
+                left_handed_position[2],  # z (front) becomes y (front)
+                left_handed_position[1],  # y (up) becomes z (up)
+            ]
+        )
+
+        # Get rotation matrix from quaternion
+        left_handed_rotation = quat_to_rotmat(obs[1][AGENT_ID][0:4])
+
+        # Convert rotation matrix for right-handed coordinate system
+        # Swap columns and rows for y and z
+        right_handed_rotation = np.array(
+            [
+                [left_handed_rotation[0, 0], left_handed_rotation[0, 2], left_handed_rotation[0, 1]],
+                [left_handed_rotation[2, 0], left_handed_rotation[2, 2], left_handed_rotation[2, 1]],
+                [left_handed_rotation[1, 0], left_handed_rotation[1, 2], left_handed_rotation[1, 1]],
+            ]
+        )
+
+        return right_handed_position, right_handed_rotation
 
     def get_mineral_pose(self, results: Dict[str, Any]) -> np.ndarray:
         """Extract mineral position from results."""
@@ -404,7 +437,7 @@ class EpMineEnv(gym.Env):
         Includes both sparse reward from Unity and dense reward based on distance change.
         """
         sparse_reward = results.reward[AGENT_ID]
-        if sparse_reward != 0:
+        if DEBUG and sparse_reward != 0:
             print(f"Sparse reward: {sparse_reward}")
         current_dist = self.calculate_distance_to_mineral(results)
         distance_reward = self.last_distance - current_dist
@@ -439,7 +472,8 @@ class EpMineEnv(gym.Env):
             Tuple of (observation, reward, done, info)
         """
         # debug: get action from keyboard: ws for action[0], ad for action[1], qe for action[2]
-        # action[1], action[0], action[2] = get_action_from_keyboard()
+        if DEBUG:
+            action[1], action[0], action[2] = get_action_from_keyboard()
 
         # Extend action with fixed arm angle and gripper control
         full_action = np.array([action[0], action[1], action[2], 10.0, 1.0], dtype=np.float32)
@@ -448,16 +482,18 @@ class EpMineEnv(gym.Env):
         obs, reward, done, info = self._step(action_tuple)
 
         # debug
-        # if self.current_results.reward[AGENT_ID] != 0:
-        #     print(
-        #         f"Step: {self.step_count}, End Reward: {self.current_results.reward[AGENT_ID]}, done: {done}, "
-        #         f"Position: {self.get_robot_pose(self.current_results)[0]}, "
-        #     )
-        # else:
-        #     print(
-        #         f"Step: {self.step_count}, Reward: {reward}, done: {done}, "
-        #         f"Position: {self.get_robot_pose(self.current_results)[0]}, "
-        #     )
+        if DEBUG:
+            trans, rotmat = self.get_robot_pose(self.current_results)
+            if self.current_results.reward[AGENT_ID] != 0:
+                print(
+                    f"Step: {self.step_count}, End Reward: {self.current_results.reward[AGENT_ID]}, done: {done}, "
+                    f"Position: {(-rotmat.T @ trans)[:2]}, "
+                )
+            else:
+                print(
+                    f"Step: {self.step_count}, Reward: {reward}, done: {done}, "
+                    f"Position: {(-rotmat.T @ trans)[:2]}, "
+                )
 
         return obs, reward, done, info
 
@@ -480,8 +516,8 @@ class EpMineEnv(gym.Env):
         else:
             self.current_results = decision_steps
         obs = self.decode_observation(self.current_results)
-        # reward = self.calculate_reward(self.current_results)
-        reward = self.calculate_reward_enhanced(self.current_results)
+        reward = self.calculate_reward(self.current_results)
+        # reward = self.calculate_reward_enhanced(self.current_results)
 
         # Check episode length limit
         self.step_count += 1

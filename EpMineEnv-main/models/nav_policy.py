@@ -116,7 +116,7 @@ class NavPolicy(nn.Module):
         # Use uniform initialization and make last layer small according to https://arxiv.org/pdf/2006.05990
         self.actor_head.uniform_init(final_layer_scale=0.01)
         self.critic_head = MLP(hidden_dim, 1, head_hidden_dims, activation="SiLU")
-        self.pose_head = MLP(hidden_dim, 3 + 9, head_hidden_dims, activation="SiLU")
+        self.pose_head = MLP(hidden_dim, 2, head_hidden_dims, activation="SiLU")
         self.hidden_dim = hidden_dim
         self.head_hidden_dims = head_hidden_dims
         self.max_seq_len = max_seq_len

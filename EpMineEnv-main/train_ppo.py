@@ -30,14 +30,14 @@ def main():
 
     seed_all(0)
 
-    n_envs = 32  # At least 24GB RAM
+    n_envs = 28  # At least 24GB RAM
     # n_envs = 1
-    n_envs_eval = 4
+    n_envs_eval = 2
     seq_len = 4
-    episode_length = 1024
+    episode_length = 256
     time_scale = 5
     # time_scale = 1
-    obs_interval = 5
+    obs_interval = 2
     use_amp = True
     env = make_vec_env(
         EpMineEnv,
@@ -74,10 +74,11 @@ def main():
             head_hidden_dims=(128, 64),
             max_seq_len=seq_len,
         ),
-        n_steps=8192 // n_envs,
+        # n_steps=8192 // n_envs,
+        n_steps=episode_length * 1,  # every env collect 1 episode before update
         batch_size=512,  # 512 for 16 GB VRAM
         n_epochs=5,
-        learning_rate=1e-4,
+        learning_rate=1e-3,
         ent_coef=0.0005,
         vf_coef=0.5,
         pose_coef=0.2,
