@@ -2,7 +2,8 @@ import torch
 import torch.nn as nn
 from .temporal_encoders import TemporalEncoder
 from .backbones import VisualBackbone
-from typing import Dict
+from typing import Dict, Optional, List, Union
+import numpy as np
 
 
 def rot9d_to_rotmat(x: torch.Tensor) -> torch.Tensor:
@@ -31,6 +32,7 @@ class MLP(nn.Module):
         input_dim: int,
         output_dim: int,
         hidden_dims: tuple = (512,),
+        activation: str = "SiLU",
     ):
         """
         Initialize the MLP class.
@@ -44,15 +46,37 @@ class MLP(nn.Module):
         super(MLP, self).__init__()
         layers = []
         in_dim = input_dim
+        activations = {
+            "SiLU": nn.SiLU(),
+            "ReLU": nn.ReLU(),
+            "Tanh": nn.Tanh(),
+        }
+        if activation not in activations:
+            raise ValueError(f"Unsupported activation function: {activation}. Supported: {list(activations.keys())}")
         for h_dim in hidden_dims:
             layers.append(nn.Linear(in_dim, h_dim))
-            layers.append(nn.SiLU())
+            layers.append(activations[activation])
             in_dim = h_dim
         layers.append(nn.Linear(in_dim, output_dim))
         self.model = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.model(x)
+
+    def uniform_init(self, final_layer_scale: float = 0.01):
+        """
+        Initialize the weights of the MLP using uniform distribution.
+        Args:
+            final_layer_scale (float): Scale for the weight of final layer. Defaults to 0.01.
+        """
+        for layer in self.model:
+            if isinstance(layer, nn.Linear):
+                stdv = 1.0 / (layer.weight.size(1) ** 0.5)
+                if layer == self.model[-1]:
+                    nn.init.uniform_(layer.weight, -stdv * final_layer_scale, stdv * final_layer_scale)
+                else:
+                    nn.init.uniform_(layer.weight, -stdv, stdv)
+                nn.init.zeros_(layer.bias)
 
 
 class NavPolicy(nn.Module):
@@ -88,9 +112,11 @@ class NavPolicy(nn.Module):
         super(NavPolicy, self).__init__()
         self.visual_backbone = VisualBackbone(backbone_name, hidden_dim)
         self.temporal_encoder = TemporalEncoder(encoder_name, hidden_dim, max_seq_len)
-        self.actor_head = MLP(hidden_dim, 3, head_hidden_dims)
-        self.critic_head = MLP(hidden_dim, 1, head_hidden_dims)
-        self.pose_head = MLP(hidden_dim, 3 + 9, head_hidden_dims)
+        self.actor_head = MLP(hidden_dim, 3, head_hidden_dims, activation="Tanh")
+        # Use uniform initialization and make last layer small according to https://arxiv.org/pdf/2006.05990
+        self.actor_head.uniform_init(final_layer_scale=0.01)
+        self.critic_head = MLP(hidden_dim, 1, head_hidden_dims, activation="SiLU")
+        self.pose_head = MLP(hidden_dim, 3 + 9, head_hidden_dims, activation="SiLU")
         self.hidden_dim = hidden_dim
         self.head_hidden_dims = head_hidden_dims
         self.max_seq_len = max_seq_len
@@ -128,7 +154,7 @@ class NavPolicy(nn.Module):
             output_pose (bool): If True, compute the pose (pose head). Defaults to True.
             output_action (bool): If True, compute the action (actor head). Defaults to True.
         Returns:
-            tuple: Tuple of actor, critic and pose tensors.
+            tuple: Tuple of action, value and pose tensors.
         """
         # Process image input
         image = x["image"]
@@ -177,7 +203,78 @@ class NavPolicy(nn.Module):
 
         return action, value, pose
 
-    def predict(self, x: Dict[str, torch.Tensor], seq_len: int = 8, clear_cache: bool = False) -> torch.Tensor:
+    def forward_rollout_deprecated(
+        self,
+        x: Dict[str, torch.Tensor],
+        output_value: bool = True,
+        output_pose: bool = True,
+        output_action: bool = True,
+        dones: Optional[np.ndarray] = None,
+    ) -> tuple:
+        """
+        [Deprecated]
+        Forward pass through the navigation policy. This is used for rollout,
+        which means that observations are consecutive, so we use the newest observation
+        and cache the previous ones.
+
+        Args:
+            x (Dict[str, torch.Tensor]): Input dictionary containing:
+                - image: tensor of shape (batch_size, seq_len, channels, height, width)
+                - state: tensor of shape (batch_size, seq_len, 12) or None
+            output_value (bool): If True, compute the value (critic head). Defaults to True.
+            output_pose (bool): If True, compute the pose (pose head). Defaults to True.
+            output_action (bool): If True, compute the action (actor head). Defaults to True.
+            dones (Optional[np.ndarray]): Array of booleans indicating whether each sequence is done. Defaults to None.
+        Returns:
+            tuple: Tuple of actor, critic and pose tensors.
+        """
+        # Process image input
+        image = x["image"]
+        if len(image.shape) != 5:
+            raise ValueError(f"Image tensor must be 5D, but got {len(image.shape)}D tensor.")
+        if image.shape[2] != 3:
+            raise ValueError(f"Image tensor must have channels=3, but got {image.shape[2]}.")
+
+        batch_size = image.size(0)
+        seq_len = image.size(1)
+
+        # extract newest (batch_size, channels, height, width)
+        image = image[:, -1, :, :, :]
+
+        # pass through visual backbone
+        feat = self.visual_backbone(image)  # (batch_size, hidden_dim)
+
+        # pass through temporal encoder
+        feat = self.temporal_encoder.infer(feat, seq_len, clear_cache=dones)
+
+        # pass through critic head
+        if output_value:
+            value = self.critic_head(feat)  # (batch_size, 1)
+        else:
+            value = None
+
+        # pass through actor head
+        if output_action:
+            action = self.actor_head(feat)  # (batch_size, 3)
+            action = torch.tanh(action)  # normalize to [-1,1]
+            action = self._unnormalize_action(action)  # scale to actual action space
+        else:
+            action = None
+
+        # pass through pose head
+        if output_pose:
+            pose = self.pose_head(feat)  # (batch_size, 3 + 9)
+
+            # svd not implemented for AMP (half precision)
+            # pose[:, 3:] = rot9d_to_rotmat(pose[:, 3:]).view(-1, 9)  # reconstruct rotation matrix
+        else:
+            pose = None
+
+        return action, value, pose
+
+    def predict(
+        self, x: Dict[str, torch.Tensor], seq_len: int = 8, clear_cache: Union[bool, np.ndarray] = False
+    ) -> torch.Tensor:
         """
         Predict the action and value given the input.
         Args:
@@ -185,7 +282,7 @@ class NavPolicy(nn.Module):
                 - image: tensor of shape (batch_size, channels, height, width)
                 - state: tensor of shape (batch_size, 12) or None
             seq_len (int): Sequence length for Transformer. Defaults to 8.
-            clear_cache (bool): Whether to clear the cache (e.g. start a new episode). Defaults to False.
+            clear_cache (bool | array): Whether to clear the cache (e.g. start a new episode). Defaults to False.
         Returns:
             torch.Tensor: Predicted action tensor of shape (batch_size, 3).
         """

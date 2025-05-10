@@ -8,6 +8,7 @@ from algorithms.nav_policy_wrapper import NavActorCriticPolicy
 from algorithms.custom_ppo import CustomPPO
 import argparse
 
+
 def evaluate_model(model_path: str, n_episodes: int = 10):
     # Create environment
     env = make_vec_env(
@@ -22,44 +23,48 @@ def evaluate_model(model_path: str, n_episodes: int = 10):
         n_envs=1,
         seed=42,
     )
-    
+
     # Load the trained model
-    model = PPO.load(model_path, env=env)
+    model = CustomPPO.load(model_path, env=env)
     # Uncomment below for CustomPPO model
     # model = CustomPPO.load(model_path, env=env)
-    
+
     rewards = []
     episode_lengths = []
-    
+
     for episode in range(n_episodes):
         obs = env.reset()
         episode_reward = 0
         episode_length = 0
         done = False
-        
+
         while not done:
             action, _states = model.predict(obs, deterministic=True)
+            print(f"Action: {action}, Episode length: {episode_length}")
             obs, reward, done, info = env.step(action)
             episode_reward += reward[0]
             episode_length += 1
-                
+
         rewards.append(episode_reward)
         episode_lengths.append(episode_length)
         print(f"Episode {episode + 1} reward: {episode_reward:.2f}, length: {episode_length}")
-    
+
     print("\nEvaluation Results:")
     print(f"Mean reward: {np.mean(rewards):.2f} +/- {np.std(rewards):.2f}")
     print(f"Mean episode length: {np.mean(episode_lengths):.2f} +/- {np.std(episode_lengths):.2f}")
-    
+
     env.close()
 
+
 if __name__ == "__main__":
+    default_model_path = (
+        "/app/EpMineEnv-main/checkpoints/training/ppo_model_900000_steps.zip"  # Change this to your model path
+    )
+    default_episodes = 10
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO model")
-    parser.add_argument("--model-path", type=str, required=True, 
-                      help="Path to the saved model")
-    parser.add_argument("--episodes", type=int, default=10,
-                      help="Number of episodes to evaluate")
-    
+    parser.add_argument("--model-path", type=str, default=default_model_path, help="Path to the saved model")
+    parser.add_argument("--episodes", type=int, default=default_episodes, help="Number of episodes to evaluate")
+
     args = parser.parse_args()
-    
+
     evaluate_model(args.model_path, args.episodes)

@@ -33,7 +33,7 @@ RUN conda create -n mine_env python=3.8 -y && \
 
 RUN conda activate mine_env && \
     pip install stable-baselines3==1.5.0 gym numpy torch accelerate && \
-    pip install protobuf~=3.20 tensorboard ipykernel
+    pip install protobuf~=3.20 tensorboard ipykernel pynput
 
 # Add color prompt to bashrc
 RUN echo 'PS1="\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]# "' >> /root/.bashrc

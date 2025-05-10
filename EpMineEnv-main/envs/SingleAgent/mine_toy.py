@@ -9,6 +9,7 @@ import cv2 as cv
 import gym
 import socket
 from collections import deque
+from pynput import keyboard
 from .config import UNITY_ENV_PATH
 from models.backbones import VisualBackbone
 
@@ -22,6 +23,103 @@ if IMAGE_BACKBONE_MODE == "vint":
 else:
     DEFAULT_IMAGE_SIZE = (3, 128, 128)
 DEFAULT_STATE_SIZE = 3 + 9  # 3 for translation, 9 for rotation matrix
+
+# Global key state dictionary to track pressed keys
+key_states = {
+    "w": False,  # Forward
+    "s": False,  # Backward
+    "a": False,  # Left
+    "d": False,  # Right
+    "q": False,  # Rotate left
+    "e": False,  # Rotate right
+}
+
+
+# Key press and release callback functions
+def on_press(key):
+    """
+    Callback function when a key is pressed
+    """
+    try:
+        k = key.char.lower()  # Convert to lowercase
+        if k in key_states:
+            key_states[k] = True
+    except AttributeError:
+        # Special keys that don't have a char attribute
+        pass
+
+
+def on_release(key):
+    """
+    Callback function when a key is released
+    """
+    try:
+        k = key.char.lower()
+        if k in key_states:
+            key_states[k] = False
+    except AttributeError:
+        pass
+
+
+# Setup keyboard listener
+listener = keyboard.Listener(on_press=on_press, on_release=on_release)
+listener.start()
+
+
+def get_action_from_keyboard() -> Tuple[float, float, float]:
+    """
+    Read keyboard input and convert to robot actions without waiting.
+    Uses pynput to detect pressed keys globally, doesn't require an active window.
+
+    Controls:
+    - W/S: Forward/Backward movement (action[0])
+    - A/D: Left/Right movement (action[1])
+    - Q/E: Rotation (action[2])
+
+    Returns:
+        Tuple[float, float, float]: Action values for [forward/backward, left/right, rotation]
+    """
+    # Default action (no movement)
+    action_y = 0.0  # Forward/Backward
+    action_x = 0.0  # Left/Right
+    action_w = 0.0  # Rotation
+
+    # Movement speed multipliers
+    move_speed = 5.0
+    rotation_speed = 1.0
+
+    # Check global key states
+    if key_states["w"]:
+        action_y = move_speed
+    elif key_states["s"]:
+        action_y = -move_speed
+
+    if key_states["a"]:
+        action_x = -move_speed
+    elif key_states["d"]:
+        action_x = move_speed
+
+    if key_states["q"]:
+        action_w = -rotation_speed
+    elif key_states["e"]:
+        action_w = rotation_speed
+
+    return action_y, action_x, action_w
+
+
+# Clean up keyboard listener when program exits
+import atexit
+
+
+def exit_handler():
+    """
+    Stop the keyboard listener when the program exits
+    """
+    if listener.is_alive():
+        listener.stop()
+
+
+atexit.register(exit_handler)
 
 
 def check_port_availability(port: int, host: str = "127.0.0.1") -> bool:
@@ -93,6 +191,7 @@ class EpMineEnv(gym.Env):
         no_graphics: bool = False,
         history_length: int = 8,
         image_preprocess_mode: str = IMAGE_BACKBONE_MODE,
+        obs_interval: int = 1,
     ):
         """
         Initialize the environment with given parameters.
@@ -109,6 +208,7 @@ class EpMineEnv(gym.Env):
             no_graphics (bool): If True, runs Unity environment without graphics
             history_length (int): Number of frames to stack in history
             image_preprocess_mode (str): Preprocessing mode for images
+            obs_interval (int): Interval between observations in the history (default: 1)
         """
         # Initialize Unity channels
         self.engine_config_channel = EngineConfigurationChannel()
@@ -127,6 +227,7 @@ class EpMineEnv(gym.Env):
         self.max_episode_steps = max_episode_steps
         self.history_length = history_length
         self.image_preprocess_mode = image_preprocess_mode
+        self.obs_interval = max(1, obs_interval)  # Ensure interval is at least 1
 
         # Observation type flags
         self.only_image = only_image
@@ -139,8 +240,13 @@ class EpMineEnv(gym.Env):
         self.gripper_state = 0
 
         # Initialize observation history
-        self.image_history: Deque = deque(maxlen=history_length)
-        self.state_history: Deque = deque(maxlen=history_length)
+        # We need to store more observations to accommodate the interval
+        max_buffer_size = history_length * self.obs_interval
+        self.image_buffer: Deque = deque(maxlen=max_buffer_size)
+        self.state_buffer: Deque = deque(maxlen=max_buffer_size)
+
+        # Time counter
+        self.time_counter = time.perf_counter()
 
     @property
     def observation_space(self) -> gym.spaces.Dict:
@@ -208,7 +314,7 @@ class EpMineEnv(gym.Env):
             results: Raw results from Unity environment
 
         Returns:
-            Processed observation dictionary with history
+            Processed observation dictionary with history (ordered from oldest to newest)
         """
         obs = results.obs
         # Process image observation (uint8 -> float32, normalized)
@@ -222,17 +328,35 @@ class EpMineEnv(gym.Env):
         state_with_rotmat = np.concatenate((state[4:7], quat_to_rotmat(state[0:4]).flatten()), axis=0)  # (3 + 9)
 
         # Add current observation to history
-        self.image_history.append(image)
-        self.state_history.append(state_with_rotmat)
+        self.image_buffer.append(image)
+        self.state_buffer.append(state_with_rotmat)
 
         # If history is not full, repeat the first observation
-        while len(self.image_history) < self.history_length:
-            self.image_history.append(image)
-            self.state_history.append(state_with_rotmat)
+        while len(self.image_buffer) < self.history_length * self.obs_interval:
+            self.image_buffer.append(image)
+            self.state_buffer.append(state_with_rotmat)
+
+        # Extract observations with the specified interval
+        # We need to get the most recent observation and then go back by interval steps
+        image_history = []
+        state_history = []
+
+        for i in range(self.history_length):
+            # Calculate the index: start from the end, go back by i*interval steps
+            idx = -1 - i * self.obs_interval
+            # Use max to prevent index out of bounds errors
+            idx = max(idx, -len(self.image_buffer))
+
+            image_history.append(self.image_buffer[idx])
+            state_history.append(self.state_buffer[idx])
+
+        # Reverse the history to make it from oldest to newest
+        image_history.reverse()
+        state_history.reverse()
 
         # Stack history into arrays
-        image_stack = np.stack(list(self.image_history), axis=0)
-        state_stack = np.stack(list(self.state_history), axis=0)
+        image_stack = np.stack(image_history, axis=0)
+        state_stack = np.stack(state_history, axis=0)
 
         # Return observation dict with history
         if self.only_image:
@@ -265,11 +389,11 @@ class EpMineEnv(gym.Env):
             self.initialize_environment(self.seed_value)
 
         # Clear history
-        self.image_history.clear()
-        self.state_history.clear()
-        self.step_count = 0
+        self.image_buffer.clear()
+        self.state_buffer.clear()
         self.env.reset()
         obs, _, _, _ = self._step()
+        self.step_count = 0
         self.last_distance = self.calculate_distance_to_mineral(self.current_results)
         return obs
 
@@ -280,11 +404,29 @@ class EpMineEnv(gym.Env):
         Includes both sparse reward from Unity and dense reward based on distance change.
         """
         sparse_reward = results.reward[AGENT_ID]
+        if sparse_reward != 0:
+            print(f"Sparse reward: {sparse_reward}")
         current_dist = self.calculate_distance_to_mineral(results)
         distance_reward = self.last_distance - current_dist
         self.last_distance = current_dist
 
         return sparse_reward + distance_reward
+
+    def calculate_reward_enhanced(self, results: Dict[str, Any]) -> float:
+        """
+        Calculate reward based on https://arxiv.org/abs/1911.00357
+        and https://arxiv.org/abs/2206.00997
+        """
+        sparse_reward = results.reward[AGENT_ID]
+        # Assume positive sparse_reward for reach mineral
+        success = 1 if sparse_reward > 0 else 0
+        reward_terminal = 2.5 * success
+        current_dist = self.calculate_distance_to_mineral(results)
+        distance_reward = self.last_distance - current_dist - 0.01
+
+        enhanced_reward = reward_terminal + distance_reward
+        self.last_distance = current_dist
+        return enhanced_reward
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, Any], float, bool, dict]:
         """
@@ -296,15 +438,28 @@ class EpMineEnv(gym.Env):
         Returns:
             Tuple of (observation, reward, done, info)
         """
+        # debug: get action from keyboard: ws for action[0], ad for action[1], qe for action[2]
+        # action[1], action[0], action[2] = get_action_from_keyboard()
+
         # Extend action with fixed arm angle and gripper control
         full_action = np.array([action[0], action[1], action[2], 10.0, 1.0], dtype=np.float32)
 
         action_tuple = ActionTuple(np.array([full_action]))
         obs, reward, done, info = self._step(action_tuple)
-        self.step_count += 1
 
-        # No need to include robot pose in info since it's in observation
-        return obs, reward, done, {}
+        # debug
+        # if self.current_results.reward[AGENT_ID] != 0:
+        #     print(
+        #         f"Step: {self.step_count}, End Reward: {self.current_results.reward[AGENT_ID]}, done: {done}, "
+        #         f"Position: {self.get_robot_pose(self.current_results)[0]}, "
+        #     )
+        # else:
+        #     print(
+        #         f"Step: {self.step_count}, Reward: {reward}, done: {done}, "
+        #         f"Position: {self.get_robot_pose(self.current_results)[0]}, "
+        #     )
+
+        return obs, reward, done, info
 
     def _step(self, action: Optional[ActionTuple] = None) -> Tuple[Any, float, bool, dict]:
         """Internal step function that handles Unity environment interaction."""
@@ -325,16 +480,15 @@ class EpMineEnv(gym.Env):
         else:
             self.current_results = decision_steps
         obs = self.decode_observation(self.current_results)
-        reward = self.calculate_reward(self.current_results)
-        # robot_position = self.get_robot_pose(self.current_results)[0]
-        robot_position, robot_rotation = self.get_robot_pose(self.current_results)
+        # reward = self.calculate_reward(self.current_results)
+        reward = self.calculate_reward_enhanced(self.current_results)
 
         # Check episode length limit
+        self.step_count += 1
+        self.time_counter = time.perf_counter()
         if self.step_count >= self.max_episode_steps:
             done = True
 
-        info["robot_position"] = robot_position
-        info["robot_rotation"] = robot_rotation
         return obs, reward, done, info
 
 

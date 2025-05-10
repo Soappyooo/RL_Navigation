@@ -10,6 +10,8 @@ from torch.nn import functional as F
 from tqdm import tqdm
 
 from stable_baselines3.common.on_policy_algorithm import OnPolicyAlgorithm
+
+# from .custom_on_policy_algorithm import CustomOnPolicyAlgorithm
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import explained_variance, get_schedule_fn
@@ -289,16 +291,16 @@ class CustomPPO(OnPolicyAlgorithm):
                     )
 
                     # Calculate approximate form of reverse KL Divergence for early stopping
-                    # with th.no_grad():
-                    #     log_ratio = log_prob - rollout_data.old_log_prob
-                    #     approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
-                    #     approx_kl_divs.append(approx_kl_div)
+                    with th.no_grad():
+                        log_ratio = log_prob - rollout_data.old_log_prob
+                        approx_kl_div = th.mean((th.exp(log_ratio) - 1) - log_ratio).cpu().numpy()
+                        approx_kl_divs.append(approx_kl_div)
 
-                    # if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
-                    #     continue_training = False
-                    #     if self.verbose >= 1:
-                    #         print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
-                    #     break
+                    if self.target_kl is not None and approx_kl_div > 1.5 * self.target_kl:
+                        continue_training = False
+                        if self.verbose >= 1:
+                            print(f"Early stopping at step {epoch} due to reaching max kl: {approx_kl_div:.2f}")
+                        break
 
                 # Optimization step with AMP support
                 self.policy.optimizer.zero_grad()
@@ -368,12 +370,36 @@ class CustomPPO(OnPolicyAlgorithm):
     def predict(
         self,
         observation: Dict[str, th.Tensor],
+        deterministic: bool = False,
+        **kwargs: Any,
+    ) -> np.ndarray:
+        """
+        Get the policy action from an observation.
+
+        Args:
+            obs: Dictionary containing:
+                - image: tensor of shape (channels, height, width)
+                - state: tensor of shape (12) or None
+            deterministic: Whether or not to return deterministic actions.
+
+        Returns:
+            the model's action, and thing not used here
+        """
+        actions = self.policy.predict(observation, deterministic=deterministic)
+        if isinstance(self.action_space, spaces.Box):
+            clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+        return clipped_actions, None
+
+    def predict_deprecated(
+        self,
+        observation: Dict[str, th.Tensor],
         clear_cache: bool = False,
         deterministic: bool = False,
         episode_start: np.ndarray = None,
         **kwargs: Any,
     ) -> np.ndarray:
         """
+        [Deprecated]
         Get the policy action from an observation.
 
         Args:
@@ -387,7 +413,7 @@ class CustomPPO(OnPolicyAlgorithm):
         Returns:
             the model's action, and thing not used here
         """
-        if episode_start is not None:
-            if np.any(episode_start):
-                clear_cache = True
-        return self.policy.predict(observation, deterministic=deterministic, clear_cache=clear_cache), None
+        actions = self.policy.predict(observation, deterministic=deterministic, clear_cache=episode_start)
+        if isinstance(self.action_space, spaces.Box):
+            clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
+        return clipped_actions, None

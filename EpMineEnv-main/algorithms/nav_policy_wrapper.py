@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import gym
 from stable_baselines3.common.policies import ActorCriticPolicy
-from typing import Tuple, Dict, Any, Optional, List
+from typing import Tuple, Dict, Any, Optional, List, Union
 from pathlib import Path
 
 from models.nav_policy import NavPolicy
@@ -71,24 +71,27 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             )
             print(f"Loaded pretrained backbone from {self.pretrained_backbone_path.resolve()}")
 
-    def forward(self, obs: Dict[str, th.Tensor], deterministic: bool = False) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
+    def forward(
+        self, obs: Dict[str, th.Tensor], deterministic: bool = False, dones: Optional[List[bool]] = None
+    ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
         """
-        Forward pass in all the networks (actor, critic and pose)
+        Forward pass in all the networks (actor, critic and pose). Used in rollout.
 
         Args:
             obs: Dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
                 - state: tensor of shape (batch_size, seq_len, 12) or None
             deterministic: Whether to sample or use deterministic actions
+            dones: [Deprecated] Optional list indicating whether each sequence is done
 
         Returns:
             actions, values, log_probs
         """
-        actions, values, _ = self.nav_policy(obs, output_pose=False)
+        actions, values, _ = self.nav_policy.forward(obs, output_pose=False)
         distribution = self._get_action_dist_from_latent(actions)
 
         if deterministic:
-            actions = distribution.mode()
+            actions = distribution.mean
         else:
             actions = distribution.sample()
 
@@ -101,7 +104,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """
         Evaluate actions according to the current policy,
-        given the observations.
+        given the observations. Used in training.
 
         Args:
             obs: Dictionary containing:
@@ -112,7 +115,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Returns:
             values, log_probs, entropy, pose_pred
         """
-        latent_pi, values, pose_pred = self.nav_policy(obs)
+        latent_pi, values, pose_pred = self.nav_policy.forward(obs)
         distribution = self._get_action_dist_from_latent(latent_pi)
 
         # For Diagonal Gaussian, we need to sum the log_probs across action dimensions
@@ -121,19 +124,20 @@ class NavActorCriticPolicy(ActorCriticPolicy):
 
         return values, log_prob, entropy, pose_pred
 
-    def predict_values(self, obs):
+    def predict_values(self, obs: Dict[str, th.Tensor], dones: Optional[List[bool]] = None) -> th.Tensor:
         """
-        Predict the value given the observation.
+        Predict the value given the observation. Used in rollout.
 
         Args:
             obs: Dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
                 - state: tensor of shape (batch_size, seq_len, 12) or None
+            dones: Optional list indicating whether each sequence is done
 
         Returns:
             values: Tensor of shape (batch_size,)
         """
-        _, values, _ = self.nav_policy(obs, output_action=False, output_pose=False)
+        _, values, _ = self.nav_policy.forward(obs, output_action=False, output_pose=False)
         return values
 
     def _get_action_dist_from_latent(self, latent_pi: th.Tensor) -> th.distributions.Distribution:
@@ -146,7 +150,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
 
         # Create Gaussian distribution with learned std
         log_std = self.log_std
-        std = th.ones_like(mean_actions) * th.exp(log_std)
+        std = th.ones_like(mean_actions) * th.exp(log_std) * 0.5
         return th.distributions.Normal(mean_actions, std)
 
     def _build(self, lr_schedule) -> None:
@@ -181,7 +185,6 @@ class NavActorCriticPolicy(ActorCriticPolicy):
     def predict(
         self,
         observation: Dict[str, th.Tensor],
-        clear_cache: bool = False,
         deterministic: bool = False,
     ) -> np.ndarray:
         """
@@ -189,29 +192,70 @@ class NavActorCriticPolicy(ActorCriticPolicy):
 
         Args:
             obs: Dictionary containing:
-                - image: tensor of shape (channels, height, width)
-                - state: tensor of shape (12) or None
-            clear_cache: Whether to clear the cache (e.g. start a new episode).
+                - image: tensor of shape (batch_size, seq_len, channels, height, width)
+                - state: tensor of shape (batch_size, 12) or None
             deterministic: Whether or not to return deterministic actions.
 
         Returns:
-            the model's action
+            the model's action of shape (batch_size, action_dim)
         """
         with th.no_grad():
             # Convert observation to tensor
             obs = th.as_tensor(observation["image"]).float().to(self.device)
-            # add batch dimension if needed
-            if obs.dim() == 3:
-                obs = obs.unsqueeze(0)
-            # check if obs is 4D
-            if obs.dim() != 4:
-                if obs.dim() == 5:  # (batch_size, seq_len, channels, height, width)
-                    obs = obs[0, -1, :, :, :].unsqueeze(0)  # take the last frame
+            # check if obs is (batch_size, seq_len, channels, height, width)
+            if obs.dim() != 5:
+                if obs.dim() == 4:  # (seq_len, channels, height, width)
+                    obs = obs.unsqueeze(0)  # make it (1, seq_len, channels, height, width)
                 else:
-                    raise ValueError(f"Image tensor must be 4D, but got {obs.dim()}D tensor.")
-            # check if obs is 3 channels
-            if obs.shape[1] != 3:
-                raise ValueError(f"Image tensor must have channels=3, but got {obs.shape[1]}.")
+                    raise ValueError(f"Image tensor must be 5D, but got {obs.dim()}D tensor.")
+
+            # take the whole sequence
+            actions, _, _ = self.nav_policy.forward(
+                {"image": obs, "state": None},
+                output_value=False,
+                output_pose=False,
+            )
+
+            distribution = self._get_action_dist_from_latent(actions)
+
+            if deterministic:
+                actions = distribution.mean
+            else:
+                actions = distribution.sample()
+
+        return actions.numpy(force=True)  # (batch_size, action_dim)
+
+    def predict_deprecated(
+        self,
+        observation: Dict[str, th.Tensor],
+        clear_cache: Union[bool, np.ndarray] = False,
+        deterministic: bool = False,
+    ) -> np.ndarray:
+        """
+        [Deprecated]
+        Get the policy action from an observation.
+
+        Args:
+            obs: Dictionary containing:
+                - image: tensor of shape (batch_size, seq_len, channels, height, width)
+                - state: tensor of shape (batch_size, 12) or None
+            clear_cache: Whether to clear the cache (e.g. start a new episode).
+            deterministic: Whether or not to return deterministic actions.
+
+        Returns:
+            the model's action of shape (batch_size, action_dim)
+        """
+        with th.no_grad():
+            # Convert observation to tensor
+            obs = th.as_tensor(observation["image"]).float().to(self.device)
+            # check if obs is (batch_size, seq_len, channels, height, width)
+            if obs.dim() != 5:
+                if obs.dim() == 4:  # (seq_len, channels, height, width)
+                    obs = obs.unsqueeze(0)  # take the last frame
+                else:
+                    raise ValueError(f"Image tensor must be 5D, but got {obs.dim()}D tensor.")
+            # take the last frame
+            obs = obs[:, -1, :, :, :]  # (batch_size, channels, height, width)
 
             actions = self.nav_policy.predict(
                 {"image": obs, "state": None},
@@ -225,4 +269,4 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             else:
                 actions = distribution.sample()
 
-        return actions.numpy(force=True)  # [1, action_dim]
+        return actions.numpy(force=True)  # (batch_size, action_dim)
