@@ -192,6 +192,7 @@ class EpMineEnv(gym.Env):
         history_length: int = 8,
         image_preprocess_mode: str = IMAGE_BACKBONE_MODE,
         obs_interval: int = 1,
+        render_size: Tuple[int, int] = (200, 100),
     ):
         """
         Initialize the environment with given parameters.
@@ -209,11 +210,12 @@ class EpMineEnv(gym.Env):
             history_length (int): Number of frames to stack in history
             image_preprocess_mode (str): Preprocessing mode for images
             obs_interval (int): Interval between observations in the history (default: 1)
+            render_size (Tuple[int, int]): Size of the rendered image
         """
         # Initialize Unity channels
         self.engine_config_channel = EngineConfigurationChannel()
         self.engine_config_channel.set_configuration_parameters(
-            width=200, height=100, time_scale=time_scale  # Large time_scale result in low FPS
+            width=render_size[0], height=render_size[1], time_scale=time_scale  # Large time_scale result in low FPS
         )
         self.env_param_channel = EnvironmentParametersChannel()
 

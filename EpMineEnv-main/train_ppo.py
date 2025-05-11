@@ -64,8 +64,9 @@ def main():
     #     seed=0,
     # )
 
-    # TODO: weight decay (https://openreview.net/forum?id=m9Jfdz4ymO)
+    # TODO: weight decay 1e-3 (https://openreview.net/forum?id=m9Jfdz4ymO)
     # TODO: seperate pose prediction head
+    # TODO: lr 3e-4, n_epochs 3, gae_lambda 0.9, ent_coef 3e-5
 
     model = CustomPPO(
         NavActorCriticPolicy,
@@ -78,6 +79,7 @@ def main():
             hidden_dim=256,
             head_hidden_dims=(128, 64),
             max_seq_len=seq_len,
+            optimizer_kwargs=dict(weight_decay=0),
         ),
         # n_steps=8192 // n_envs,
         n_steps=int(episode_length * 2),  # every env collect n episode before update
@@ -88,6 +90,7 @@ def main():
         vf_coef=0.5,
         pose_coef=0.1,  #!
         clip_range=0.2,
+        gae_lambda=0.95,
         verbose=1,
         seed=seed,
         use_amp=use_amp,

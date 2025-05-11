@@ -26,6 +26,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         max_seq_len: int = 8,
         from_pretrained: bool = False,
         pretrained_backbone_path: Optional[Path] = None,
+        optimizer_kwargs: Optional[Dict[str, Any]] = None,
         **kwargs,
     ):
         """
@@ -41,6 +42,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             max_seq_len: Maximum sequence length for positional encoding.
             from_pretrained: Whether to load a pretrained backbone.
             pretrained_backbone_path: Path to the pretrained backbone weights.
+            optimizer_kwargs: Additional arguments for the optimizer.
             **kwargs: Additional arguments for the parent class.
         """
         self.nav_policy: NavPolicy = None
@@ -58,6 +60,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             observation_space,
             action_space,
             lr_schedule,
+            optimizer_kwargs=optimizer_kwargs,
             # Pass remaining arguments to parent
             **kwargs,
         )
