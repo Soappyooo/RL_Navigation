@@ -129,6 +129,7 @@ class NavPolicy(nn.Module):
 
     def _unnormalize_action(self, normalized_action: torch.Tensor) -> torch.Tensor:
         """
+        WE HAVE MOVED THIS FUNCTION TO nav_policy_wrapper.py
         Convert normalized action (from tanh, in [-1,1]) to actual action space
         """
         if normalized_action.device != self.action_scale.device:
@@ -188,7 +189,8 @@ class NavPolicy(nn.Module):
         if output_action:
             action = self.actor_head(feat)  # (batch_size, 3)
             action = torch.tanh(action)  # normalize to [-1,1]
-            action = self._unnormalize_action(action)  # scale to actual action space
+            # we scale it after normal distribution, moving line below to nav_policy_wrapper.py
+            # action = self._unnormalize_action(action)  # scale to actual action space
         else:
             action = None
 
@@ -257,7 +259,8 @@ class NavPolicy(nn.Module):
         if output_action:
             action = self.actor_head(feat)  # (batch_size, 3)
             action = torch.tanh(action)  # normalize to [-1,1]
-            action = self._unnormalize_action(action)  # scale to actual action space
+            # we scale it after normal distribution, moving line below to nav_policy_wrapper.py
+            # action = self._unnormalize_action(action)  # scale to actual action space
         else:
             action = None
 
@@ -297,5 +300,6 @@ class NavPolicy(nn.Module):
         feat = self.temporal_encoder.infer(feat, seq_len, clear_cache)  # (batch_size, hidden_dim)
         action = self.actor_head(feat)
         action = torch.tanh(action)  # normalize to [-1,1]
-        action = self._unnormalize_action(action)  # scale to actual action space
+        # we scale it after normal distribution, moving line below to nav_policy_wrapper.py
+        # action = self._unnormalize_action(action)  # scale to actual action space
         return action

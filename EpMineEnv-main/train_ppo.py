@@ -28,17 +28,18 @@ def main():
             f"Please run this script from the EpMineEnv-main directory." f" Current directory: {Path.cwd()}"
         )
 
-    seed_all(0)
-
-    n_envs = 28  # At least 24GB RAM
+    seed = 0
+    n_envs = 4  # 32 for At least 24GB RAM
     # n_envs = 1
     n_envs_eval = 2
-    seq_len = 4
-    episode_length = 256
+    seq_len = 8  # TODO: 8 or 4?
+    episode_length = 1024
     time_scale = 5
     # time_scale = 1
-    obs_interval = 2
+    obs_interval = 1  #!
     use_amp = True
+
+    seed_all(seed)
     env = make_vec_env(
         EpMineEnv,
         env_kwargs=dict(
@@ -62,6 +63,10 @@ def main():
     #     tensorboard_log="./logs/tensorboard",
     #     seed=0,
     # )
+
+    # TODO: weight decay (https://openreview.net/forum?id=m9Jfdz4ymO)
+    # TODO: seperate pose prediction head
+
     model = CustomPPO(
         NavActorCriticPolicy,
         env,
@@ -75,16 +80,16 @@ def main():
             max_seq_len=seq_len,
         ),
         # n_steps=8192 // n_envs,
-        n_steps=episode_length * 1,  # every env collect 1 episode before update
-        batch_size=512,  # 512 for 16 GB VRAM
-        n_epochs=5,
-        learning_rate=1e-3,
-        ent_coef=0.0005,
+        n_steps=int(episode_length * 2),  # every env collect n episode before update
+        batch_size=288,  # 512 and seq_len=4 for 16 GB VRAM
+        n_epochs=10,  #!
+        learning_rate=1e-4,
+        ent_coef=0.0001,  #!
         vf_coef=0.5,
-        pose_coef=0.2,
+        pose_coef=0.1,  #!
         clip_range=0.2,
         verbose=1,
-        seed=0,
+        seed=seed,
         use_amp=use_amp,
         tensorboard_log="./logs/tensorboard",
     )
@@ -118,7 +123,8 @@ def main():
         deterministic=True,
     )
 
-    model.learn(total_timesteps=1e6, callback=[checkpoint_callback, eval_callback])
+    # model.learn(total_timesteps=1e6, callback=[checkpoint_callback, eval_callback])  #!
+    model.learn(total_timesteps=1e6, callback=[checkpoint_callback])
 
 
 if __name__ == "__main__":

@@ -71,6 +71,33 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             )
             print(f"Loaded pretrained backbone from {self.pretrained_backbone_path.resolve()}")
 
+        self.action_space_high: th.Tensor = th.as_tensor(action_space.high).to(self.device)
+        self.action_space_low: th.Tensor = th.as_tensor(action_space.low).to(self.device)
+
+    def _unnormalize_action(self, actions: th.Tensor) -> th.Tensor:
+        """
+        Unnormalize the actions from [-1, 1] to the action space.
+        """
+        # check device
+        if self.action_space_high.device != actions.device:
+            # move action_space_* to the same device as actions
+            self.action_space_high = self.action_space_high.to(actions.device)
+            self.action_space_low = self.action_space_low.to(actions.device)
+        # actions are within [-1, 1]
+        return (actions + 1) / 2 * (self.action_space_high - self.action_space_low) + self.action_space_low
+
+    def _normalize_action(self, actions: th.Tensor) -> th.Tensor:
+        """
+        Normalize the actions from action space to [-1, 1].
+        """
+        # check device
+        if self.action_space_high.device != actions.device:
+            # move action_space_* to the same device as actions
+            self.action_space_high = self.action_space_high.to(actions.device)
+            self.action_space_low = self.action_space_low.to(actions.device)
+        # actions will be normalized to [-1, 1]
+        return (actions - self.action_space_low) / (self.action_space_high - self.action_space_low) * 2 - 1
+
     def forward(
         self, obs: Dict[str, th.Tensor], deterministic: bool = False, dones: Optional[List[bool]] = None
     ) -> Tuple[th.Tensor, th.Tensor, th.Tensor]:
@@ -97,6 +124,9 @@ class NavActorCriticPolicy(ActorCriticPolicy):
 
         log_probs = distribution.log_prob(actions).sum(dim=-1)  # Sum log_probs to get joint probability
 
+        # scale actions in [-1,1] to the action space
+        actions = self._unnormalize_action(actions)
+
         return actions, values, log_probs
 
     def evaluate_actions(
@@ -119,7 +149,9 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         distribution = self._get_action_dist_from_latent(latent_pi)
 
         # For Diagonal Gaussian, we need to sum the log_probs across action dimensions
-        log_prob = distribution.log_prob(actions).sum(dim=-1)  # Sum log_probs to get joint probability
+        log_prob = distribution.log_prob(self._normalize_action(actions)).sum(
+            dim=-1
+        )  # Sum log_probs to get joint probability
         entropy = distribution.entropy().sum(dim=-1)  # Sum entropy across action dimensions
 
         return values, log_prob, entropy, pose_pred
@@ -150,7 +182,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
 
         # Create Gaussian distribution with learned std
         log_std = self.log_std
-        std = th.ones_like(mean_actions) * th.exp(log_std) * 0.5
+        std = th.ones_like(mean_actions) * th.exp(log_std) * 0.5  # initial std is 0.5
         return th.distributions.Normal(mean_actions, std)
 
     def _build(self, lr_schedule) -> None:
@@ -222,6 +254,8 @@ class NavActorCriticPolicy(ActorCriticPolicy):
                 actions = distribution.mean
             else:
                 actions = distribution.sample()
+            # scale actions in [-1,1] to the action space
+            actions = self._unnormalize_action(actions)  # (batch_size, action_dim)
 
         return actions.numpy(force=True)  # (batch_size, action_dim)
 
@@ -268,5 +302,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
                 actions = distribution.mean
             else:
                 actions = distribution.sample()
+            # scale actions in [-1,1] to the action space
+            actions = self._unnormalize_action(actions)
 
         return actions.numpy(force=True)  # (batch_size, action_dim)
