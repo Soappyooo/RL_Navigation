@@ -5,7 +5,7 @@ from mlagents_envs.base_env import ActionTuple, DecisionSteps
 import numpy as np
 from typing import Optional, Tuple, Dict, Any, List, Deque
 import time
-import cv2 as cv
+import cv2
 import gym
 import socket
 from collections import deque
@@ -14,20 +14,11 @@ from pynput import keyboard
 import atexit
 
 from .config import UNITY_ENV_PATH
-from models.backbones import VisualBackbone
 
 # Constants for Unity environment configuration
 TEAM_NAME = "ControlEP?team=0"
 AGENT_ID = 0
-IMAGE_BACKBONE_MODE = "vint"
-
-if IMAGE_BACKBONE_MODE == "vint":
-    DEFAULT_IMAGE_SIZE = (3, 64, 85)  # CHW format after preprocessing
-else:
-    DEFAULT_IMAGE_SIZE = (3, 128, 128)
-# DEFAULT_STATE_SIZE = 3 + 9  # 3 for translation, 9 for rotation matrix
-DEFAULT_STATE_SIZE = 2  # 2 for x-y translation only
-DEBUG = False
+DEBUG = False  # Set to True for debugging, run play.py to test the environment
 
 # Global key state dictionary to track pressed keys
 key_states = {
@@ -170,6 +161,46 @@ def quat_to_rotmat(quat: np.ndarray) -> np.ndarray:
     )
 
 
+def preprocess_image(image: np.ndarray, mode: str = None) -> np.ndarray:
+    """
+    Preprocess the input image according to the checkpoint. E.g. `mode="vint"` result in
+    resizing the image to 85*64 and normalizing it with mean and std.
+    Args:
+        image (np.ndarray): Input image. H*W*3 in RGB format, uint8 (0-255).
+        mode (str, optional): Mode for preprocessing. Defaults to None.
+    Returns:
+        np.ndarray: Preprocessed image tensor of shape [3, H', W'].
+    """
+    # Check input shape and type
+    if not isinstance(image, np.ndarray):
+        raise TypeError("Input image must be a numpy array.")
+    if image.ndim != 3 or image.shape[2] != 3:
+        raise ValueError("Input image must be of shape H*W*3.")
+    if image.dtype != np.uint8:
+        raise ValueError("Input image must be of type uint8.")
+
+    if mode == "vint":
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        image = cv2.resize(image, (85, 64))
+        image = image.astype(np.float32) / 255.0
+        image = (image - mean) / std
+        image = np.transpose(image, (2, 0, 1))  # HWC to CHW
+        return image
+
+    elif mode == "simple":
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+        image = cv2.resize(image, (128, 128))
+        image = image.astype(np.float32) / 255.0
+        image = (image - mean) / std
+        image = np.transpose(image, (2, 0, 1))  # HWC to CHW
+        return image
+
+    else:
+        raise NotImplementedError(f"Preprocessing for mode '{mode}' is not implemented.")
+
+
 class EpMineEnv(gym.Env):
     """
     A custom Gym environment for robotic mineral collection task using Unity ML-Agents.
@@ -190,7 +221,7 @@ class EpMineEnv(gym.Env):
         only_state: bool = False,
         no_graphics: bool = False,
         history_length: int = 8,
-        image_preprocess_mode: str = IMAGE_BACKBONE_MODE,
+        image_preprocess_mode: str = "vint",
         obs_interval: int = 1,
         render_size: Tuple[int, int] = (200, 100),
     ):
@@ -231,6 +262,15 @@ class EpMineEnv(gym.Env):
         self.image_preprocess_mode = image_preprocess_mode
         self.obs_interval = max(1, obs_interval)  # Ensure interval is at least 1
 
+        # Set the image and state sizes
+        self.state_size = 2
+        if self.image_preprocess_mode == "vint":
+            self.image_size = (3, 64, 85)
+        elif self.image_preprocess_mode == "simple":
+            self.image_size = (3, 128, 128)
+        else:
+            raise NotImplementedError(f"Preprocessing for mode '{self.image_preprocess_mode}' is not implemented.")
+
         # Observation type flags
         self.only_image = only_image
         self.only_state = only_state
@@ -255,8 +295,8 @@ class EpMineEnv(gym.Env):
     def observation_space(self) -> gym.spaces.Dict:
         """Define the observation space structure."""
         # Image space now includes history dimension
-        image_shape = (self.history_length,) + DEFAULT_IMAGE_SIZE
-        state_shape = (self.history_length, DEFAULT_STATE_SIZE)
+        image_shape = (self.history_length,) + self.image_size
+        state_shape = (self.history_length, self.state_size)
 
         return gym.spaces.Dict(
             {
@@ -323,7 +363,7 @@ class EpMineEnv(gym.Env):
         # Process image observation (uint8 -> float32, normalized)
         image = np.array(obs[0][AGENT_ID] * 255, dtype=np.uint8)
 
-        image = VisualBackbone.preprocess_image(image, mode=self.image_preprocess_mode)  # Returns CHW format
+        image = preprocess_image(image, mode=self.image_preprocess_mode)  # Returns CHW format
 
         # Extract state information
         state = obs[1][AGENT_ID]

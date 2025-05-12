@@ -2,6 +2,9 @@ import torch
 import torch.nn as nn
 import numpy as np
 import cv2
+from typing import Union, List, Any
+from .efficientnet.model import EfficientNet
+from .simple_conv import SimpleConv
 
 
 class VisualBackbone(nn.Module):
@@ -15,17 +18,22 @@ class VisualBackbone(nn.Module):
         """
         super(VisualBackbone, self).__init__()
         self.name = name
-        self.model: nn.Module = None
+        self.model: Union[nn.Module, EfficientNet, SimpleConv] = None
         self.output_dim = output_dim
         self.output_projector: nn.Module = None
 
         if name == "efficientnet":
-            from .efficientnet.model import EfficientNet
-
-            self.model: EfficientNet = EfficientNet.from_name("efficientnet-b0")
+            self.model = EfficientNet.from_name("efficientnet-b0")
             self.output_projector = nn.Linear(1280, output_dim)
+
+        elif name == "simple":
+            self.model = SimpleConv()
+            self.output_projector = nn.Linear(2048, output_dim)
+            self.output_activation = nn.SiLU()
+
         elif name == "convnext":
             pass  # TODO
+
         else:
             raise ValueError(f"Unsupported backbone architecture: {name}")
 
@@ -42,8 +50,13 @@ class VisualBackbone(nn.Module):
         if self.name == "efficientnet":
             x = self.model.extract_features(x)
             x = self.model._avg_pooling(x)
-            x = x.view(x.size(0), -1)
+            x = x.view(x.size(0), -1)  # (batch_size, 1280)
             x = self.output_projector(x)
+            return x
+        elif self.name == "simple":
+            x = self.model(x)
+            x = x.view(x.size(0), -1)  # (batch_size, 2048)
+            x = self.output_activation(self.output_projector(x))
             return x
         else:
             raise ValueError(f"Unsupported backbone architecture: {self.name}")
@@ -62,6 +75,7 @@ class VisualBackbone(nn.Module):
     @staticmethod
     def preprocess_image(image: np.ndarray, mode: str = None) -> np.ndarray:
         """
+        [Deprecated] Moved to mine_toy.py
         Preprocess the input image according to the checkpoint. E.g. `mode="vint"` result in
         resizing the image to 85*64 and normalizing it with mean and std.
         Args:

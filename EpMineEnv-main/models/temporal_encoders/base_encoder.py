@@ -37,6 +37,9 @@ class TemporalEncoder(nn.Module):
             self.model = nn.LSTM(input_size=dim, num_layers=num_layers, hidden_size=dim, batch_first=True)
             self.cache_h: torch.Tensor = None  # cache for inference
             self.cache_c: torch.Tensor = None
+        elif name == "identity":
+            self.model = nn.Identity()
+
         else:
             raise ValueError(f"Unsupported temporal encoder architecture: {name}")
 
@@ -63,6 +66,9 @@ class TemporalEncoder(nn.Module):
         elif self.name == "lstm":
             x, _ = self.model(x)
             return x[:, -1, :]
+        elif self.name == "identity":
+            assert x.shape[1] == 1, "Identity encoder only supports seq_len=1"
+            return x.squeeze(1)  # [batch_size, 1, dim] -> [batch_size, dim] *only support seq_len=1*
         else:
             raise ValueError(f"Unsupported temporal encoder architecture: {self.name}")
 

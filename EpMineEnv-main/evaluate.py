@@ -30,6 +30,7 @@ def evaluate_model(
             history_length=history_length,
             render_size=(200, 100),
             obs_interval=obs_interval,
+            image_preprocess_mode="simple",
         ),
         n_envs=n_envs,
         seed=42,
@@ -60,13 +61,13 @@ def evaluate_model(
 
 
 if __name__ == "__main__":
-    default_model_path = "./checkpoints/nav_policy4/ppo_model_2000000_steps.zip"  # Change this to your model path
+    default_model_path = "./checkpoints/simplenav_1/ppo_model_1000000_steps.zip"  # Change this to your model path
     default_n_envs = 32
-    default_episodes = 10 * default_n_envs
+    default_episodes = 20 * default_n_envs
     default_time_scale = 5
-    default_deterministic = False
-    default_history_length = 4
-    default_obs_interval = 2
+    default_deterministic = True
+    default_history_length = 1
+    default_obs_interval = 1
 
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO model")
     parser.add_argument("--model-path", type=str, default=default_model_path, help="Path to the saved model")
