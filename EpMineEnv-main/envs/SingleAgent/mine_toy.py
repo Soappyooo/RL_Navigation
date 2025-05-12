@@ -238,6 +238,7 @@ class EpMineEnv(gym.Env):
         # Episode state
         self.step_count = 0
         self.last_distance = 0.0
+        self.last_nearby = 0
         self.current_results = None
         self.gripper_state = 0
 
@@ -374,6 +375,34 @@ class EpMineEnv(gym.Env):
             return {"image": np.zeros_like(image_stack), "state": state_stack}
         return {"image": image_stack, "state": state_stack}
 
+    def calc_z_axis_angle(self, robot_rotmat: np.ndarray) -> float:
+        """
+        Calculate the angle of the robot's z-axis against the world frame z-axis.
+        This helps determine if the robot has flipped over.
+
+        Args:
+            robot_rotmat (np.ndarray): Rotation matrix of the robot
+
+        Returns:
+            float: Angle of the z-axis in radians (0 means upright, π means flipped)
+        """
+        # Get the z-axis vector from the rotation matrix (3rd column)
+        robot_z_axis = robot_rotmat[:, 2]
+
+        # World frame z-axis in right-handed coordinates (right, front, up)
+        world_z_axis = np.array([0, 0, 1])
+
+        # Calculate the dot product between the two vectors
+        dot_product = np.dot(robot_z_axis, world_z_axis)
+
+        # Clamp the dot product to avoid numerical errors
+        dot_product = np.clip(dot_product, -1.0, 1.0)
+
+        # Calculate the angle between the vectors in radians
+        angle = np.arccos(dot_product)
+
+        return angle
+
     def get_robot_pose(self, results: Dict[str, Any]) -> Tuple[np.ndarray, np.ndarray]:
         """
         Extract robot position and rotation from results.
@@ -409,12 +438,22 @@ class EpMineEnv(gym.Env):
 
     def get_mineral_pose(self, results: Dict[str, Any]) -> np.ndarray:
         """Extract mineral position from results."""
-        return results.obs[1][AGENT_ID][10:13]
+        pose = results.obs[1][AGENT_ID][10:13]  # x, y, z for right, up and front
+        # Convert position: [x, y, z] -> [x, z, y] (right, up, front -> right, front, up)
+        right_handed_position = np.array(
+            [
+                pose[0],  # x (right) remains the same
+                pose[2],  # z (front) becomes y (front)
+                pose[1],  # y (up) becomes z (up)
+            ]
+        )
+        return right_handed_position
 
     def calculate_distance_to_mineral(self, results: Dict[str, Any]) -> float:
         """Calculate distance between robot and mineral."""
         robot_pos = self.get_robot_pose(results)[0]
-        return np.sqrt(robot_pos[0] ** 2 + robot_pos[2] ** 2)
+        mineral_pos = self.get_mineral_pose(results)
+        return np.linalg.norm(robot_pos - mineral_pos)
 
     def reset(self, seed: Optional[int] = None, options: Optional[dict] = None) -> Any:
         """Reset the environment to initial state."""
@@ -426,8 +465,11 @@ class EpMineEnv(gym.Env):
         # Clear history
         self.image_buffer.clear()
         self.state_buffer.clear()
-        self.env.reset()
-        obs, _, _, _ = self._step()
+        z_angle = 180
+        while abs(z_angle) > 10:
+            self.env.reset()
+            obs, _, _, info = self._step()
+            z_angle = np.degrees(info["z_angle"])
         self.step_count = 0
         self.last_distance = self.calculate_distance_to_mineral(self.current_results)
         return obs
@@ -455,12 +497,16 @@ class EpMineEnv(gym.Env):
         sparse_reward = results.reward[AGENT_ID]
         # Assume positive sparse_reward for reach mineral
         success = 1 if sparse_reward > 0 else 0
-        reward_terminal = 2.5 * success
+        terminal_reward = 2.5 * success
         current_dist = self.calculate_distance_to_mineral(results)
         distance_reward = self.last_distance - current_dist - 0.01
 
-        enhanced_reward = reward_terminal + distance_reward
+        nearby = 1 if current_dist < 0.45 else 0
+        nearby_reward = 2.5 * (nearby - self.last_nearby)
+
+        enhanced_reward = terminal_reward + distance_reward + nearby_reward
         self.last_distance = current_dist
+        self.last_nearby = nearby
         return enhanced_reward
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, Any], float, bool, dict]:
@@ -486,15 +532,16 @@ class EpMineEnv(gym.Env):
         # debug
         if DEBUG:
             trans, rotmat = self.get_robot_pose(self.current_results)
+            z_angle = self.calc_z_axis_angle(rotmat)
             if self.current_results.reward[AGENT_ID] != 0:
                 print(
                     f"Step: {self.step_count}, End Reward: {self.current_results.reward[AGENT_ID]}, done: {done}, "
-                    f"Position: {(-rotmat.T @ trans)[:2]}, "
+                    f"Position: {(-rotmat.T @ trans)[:2]}, Abs Position: {trans[:2]}, Angle: {np.degrees(z_angle):.0f}, "
                 )
             else:
                 print(
                     f"Step: {self.step_count}, Reward: {reward}, done: {done}, "
-                    f"Position: {(-rotmat.T @ trans)[:2]}, "
+                    f"Position: {(-rotmat.T @ trans)[:2]}, Abs Position: {trans[:2]}, Angle: {np.degrees(z_angle):.0f}, "
                 )
 
         return obs, reward, done, info
@@ -521,6 +568,11 @@ class EpMineEnv(gym.Env):
         reward = self.calculate_reward(self.current_results)
         # reward = self.calculate_reward_enhanced(self.current_results)
 
+        # Check if the robot is flipped over
+        rotmat = self.get_robot_pose(self.current_results)[1]
+        z_angle = self.calc_z_axis_angle(rotmat)
+        info["z_angle"] = z_angle
+
         # Check episode length limit
         self.step_count += 1
         self.time_counter = time.perf_counter()
@@ -532,25 +584,18 @@ class EpMineEnv(gym.Env):
 
 def main():
     """Example usage of the environment."""
-    env = EpMineEnv(port=3000)
+    env = EpMineEnv(port=3000, time_scale=1, render_size=(800, 600), max_episode_steps=32)
     obs = env.reset()
     done = False
     step = 0
 
-    last_time = time.perf_counter()
-    while not done:
-        current_time = time.perf_counter()
-        elapsed_time = current_time - last_time
-        print(f"Elapsed time: {elapsed_time:.2f} seconds")
-        last_time = current_time
-
-        # action = env.action_space.sample()
-        action = np.array([0.0, 0.0, 0.1], dtype=np.float32)
-        obs, reward, done, info = env.step(action)
-        position = info["robot_position"]
-        rotation = info["robot_rotation"]
-        print(f"Step: {step}, Action: {action}, Reward: {reward}, Position: {position}, Rotation: {rotation}")
-        step += 1
+    while True:
+        while not done:
+            action = np.array([0.0, 0.0, 0.0], dtype=np.float32)
+            obs, reward, done, info = env.step(action)
+            step += 1
+        done = False
+        obs = env.reset()
 
 
 if __name__ == "__main__":

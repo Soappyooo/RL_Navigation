@@ -11,7 +11,13 @@ import argparse
 
 
 def evaluate_model(
-    model_path: str, n_episodes: int = 10, n_envs: int = 1, deterministic: bool = True, time_scale: int = 1
+    model_path: str,
+    n_episodes: int = 10,
+    n_envs: int = 1,
+    deterministic: bool = True,
+    time_scale: int = 1,
+    history_length: int = 8,
+    obs_interval: int = 1,
 ):
     # Create environment
     env = make_vec_env(
@@ -21,8 +27,9 @@ def evaluate_model(
             max_episode_steps=512,
             only_image=True,
             only_state=False,
-            history_length=8,
+            history_length=history_length,
             render_size=(200, 100),
+            obs_interval=obs_interval,
         ),
         n_envs=n_envs,
         seed=42,
@@ -53,13 +60,13 @@ def evaluate_model(
 
 
 if __name__ == "__main__":
-    default_model_path = (
-        "/app/EpMineEnv-main/checkpoints/training/ppo_model_1000000_steps.zip"  # Change this to your model path
-    )
-    default_n_envs = 8
+    default_model_path = "./checkpoints/nav_policy4/ppo_model_2000000_steps.zip"  # Change this to your model path
+    default_n_envs = 32
     default_episodes = 10 * default_n_envs
     default_time_scale = 5
     default_deterministic = False
+    default_history_length = 4
+    default_obs_interval = 2
 
     parser = argparse.ArgumentParser(description="Evaluate a trained PPO model")
     parser.add_argument("--model-path", type=str, default=default_model_path, help="Path to the saved model")
@@ -68,6 +75,12 @@ if __name__ == "__main__":
     parser.add_argument("--time-scale", type=int, default=default_time_scale, help="Time scale for the environment")
     parser.add_argument(
         "--deterministic", action="store_true", default=default_deterministic, help="Use deterministic actions"
+    )
+    parser.add_argument(
+        "--history-length", type=int, default=default_history_length, help="History length for the environment"
+    )
+    parser.add_argument(
+        "--obs-interval", type=int, default=default_obs_interval, help="Observation interval for the environment"
     )
 
     args = parser.parse_args()
@@ -78,4 +91,6 @@ if __name__ == "__main__":
         n_envs=args.n_envs,
         deterministic=args.deterministic,
         time_scale=args.time_scale,
+        history_length=args.history_length,
+        obs_interval=args.obs_interval,
     )

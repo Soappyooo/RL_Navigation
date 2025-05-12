@@ -29,15 +29,17 @@ def main():
         )
 
     seed = 0
-    n_envs = 4  # 32 for At least 24GB RAM
+    n_envs = 32  # 32 for At least 24GB RAM
     # n_envs = 1
     n_envs_eval = 2
-    seq_len = 8  # TODO: 8 or 4?
-    episode_length = 1024
+    seq_len = 4  # TODO: 8 or 4?
+    episode_length = 2048
     time_scale = 5
     # time_scale = 1
-    obs_interval = 1  #!
+    obs_interval = 2  #!
     use_amp = True
+    resume = True
+    resume_path = "./checkpoints/nav_policy4/ppo_model_1000000_steps.zip"
 
     seed_all(seed)
     env = make_vec_env(
@@ -51,7 +53,7 @@ def main():
             obs_interval=obs_interval,
         ),
         n_envs=n_envs,
-        seed=0,
+        seed=seed,
         vec_env_cls=SubprocVecEnv,
     )
 
@@ -59,6 +61,8 @@ def main():
     #     "MultiInputPolicy",
     #     env,
     #     verbose=1,
+    #     n_steps=int(episode_length * 1),
+    #     batch_size=512,
     #     ent_coef=0.01,
     #     tensorboard_log="./logs/tensorboard",
     #     seed=0,
@@ -68,34 +72,38 @@ def main():
     # TODO: seperate pose prediction head
     # TODO: lr 3e-4, n_epochs 3, gae_lambda 0.9, ent_coef 3e-5
 
-    model = CustomPPO(
-        NavActorCriticPolicy,
-        env,
-        policy_kwargs=dict(
-            backbone_name="efficientnet",
-            encoder_name="lstm",
-            from_pretrained=True,
-            pretrained_backbone_path=Path("./checkpoints/pretrained/vint_pretrained_efficientnet.pth"),
-            hidden_dim=256,
-            head_hidden_dims=(128, 64),
-            max_seq_len=seq_len,
-            optimizer_kwargs=dict(weight_decay=0),
-        ),
-        # n_steps=8192 // n_envs,
-        n_steps=int(episode_length * 2),  # every env collect n episode before update
-        batch_size=288,  # 512 and seq_len=4 for 16 GB VRAM
-        n_epochs=10,  #!
-        learning_rate=1e-4,
-        ent_coef=0.0001,  #!
-        vf_coef=0.5,
-        pose_coef=0.1,  #!
-        clip_range=0.2,
-        gae_lambda=0.95,
-        verbose=1,
-        seed=seed,
-        use_amp=use_amp,
-        tensorboard_log="./logs/tensorboard",
-    )
+    if resume:
+        # Load the model from the checkpoint
+        model = CustomPPO.load(resume_path, env=env)
+    else:
+        model = CustomPPO(
+            NavActorCriticPolicy,
+            env,
+            policy_kwargs=dict(
+                backbone_name="efficientnet",
+                encoder_name="lstm",
+                from_pretrained=True,
+                pretrained_backbone_path=Path("./checkpoints/pretrained/vint_pretrained_efficientnet.pth"),
+                hidden_dim=256,
+                head_hidden_dims=(128, 64),
+                max_seq_len=seq_len,
+                optimizer_kwargs=dict(weight_decay=0),
+            ),
+            # n_steps=8192 // n_envs,
+            n_steps=int(episode_length * 0.125),  # every env collect at least n episode before update
+            batch_size=512,  # 512 and seq_len=4 for 16 GB VRAM
+            n_epochs=10,  #!
+            learning_rate=1e-4,
+            ent_coef=1e-5,  #!
+            vf_coef=0.5,
+            pose_coef=0.1,  #!
+            clip_range=0.2,
+            gae_lambda=0.95,
+            verbose=1,
+            seed=seed,
+            use_amp=use_amp,
+            tensorboard_log="./logs/tensorboard",
+        )
 
     # Set up callbacks
     checkpoint_callback = CheckpointCallback(
@@ -127,7 +135,7 @@ def main():
     )
 
     # model.learn(total_timesteps=1e6, callback=[checkpoint_callback, eval_callback])  #!
-    model.learn(total_timesteps=1e6, callback=[checkpoint_callback])
+    model.learn(total_timesteps=1e6, callback=[checkpoint_callback], reset_num_timesteps=False)
 
 
 if __name__ == "__main__":
