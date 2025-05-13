@@ -2,13 +2,13 @@ import torch
 import torch.nn as nn
 import numpy as np
 import cv2
-from typing import Union, List, Any
+from typing import Union, List, Any, Literal
 from .efficientnet.model import EfficientNet
 from .simple_conv import SimpleConv
 
 
 class VisualBackbone(nn.Module):
-    def __init__(self, name: str, output_dim: int = 512):
+    def __init__(self, name: Literal["efficientnet", "simple"], output_dim: int = 512):
         """
         Initialize the VisualBackbone class.
 
@@ -30,9 +30,6 @@ class VisualBackbone(nn.Module):
             self.model = SimpleConv()
             self.output_projector = nn.Linear(2048, output_dim)
             self.output_activation = nn.SiLU()
-
-        elif name == "convnext":
-            pass  # TODO
 
         else:
             raise ValueError(f"Unsupported backbone architecture: {name}")

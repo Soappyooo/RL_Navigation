@@ -3,7 +3,7 @@ import torch.nn as nn
 import numpy as np
 import gym
 from stable_baselines3.common.policies import ActorCriticPolicy
-from typing import Tuple, Dict, Any, Optional, List, Union
+from typing import Tuple, Dict, Any, Optional, List, Union, Literal
 from pathlib import Path
 
 from models.nav_policy import NavPolicy
@@ -19,14 +19,15 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         observation_space: gym.spaces.Space,
         action_space: gym.spaces.Space,
         lr_schedule: callable,
-        backbone_name: str = "efficientnet",
-        encoder_name: str = "transformer",
+        backbone_name: Literal["efficientnet", "simple"] = "efficientnet",
+        encoder_name: Literal["identity", "lstm", "transformer", "mlp"] = "transformer",
         hidden_dim: int = 512,
         head_hidden_dims: Tuple[int] = (256, 128),
-        max_seq_len: int = 8,
+        seq_len: int = 1,
         from_pretrained: bool = False,
         pretrained_backbone_path: Optional[Path] = None,
         optimizer_kwargs: Optional[Dict[str, Any]] = None,
+        pose_auxiliary_mode: Literal["naive", "concatenate"] = "naive",
         **kwargs,
     ):
         """
@@ -39,14 +40,14 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             encoder_name: Name of the temporal encoder architecture.
             hidden_dim: Hidden dimension of the policy.
             head_hidden_dims: Tuple of hidden dimensions for the heads.
-            max_seq_len: Maximum sequence length for positional encoding.
+            max_seq_len: Sequence length for image and state inputs.
             from_pretrained: Whether to load a pretrained backbone.
             pretrained_backbone_path: Path to the pretrained backbone weights.
             optimizer_kwargs: Additional arguments for the optimizer.
             **kwargs: Additional arguments for the parent class.
         """
         self.nav_policy: NavPolicy = None
-        self.max_seq_len = max_seq_len
+        self.seq_len = seq_len
         self.backbone_name = backbone_name
         self.encoder_name = encoder_name
         self.hidden_dim = hidden_dim
@@ -54,6 +55,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         self.action_dim = action_space.shape[0]
         self.from_pretrained = from_pretrained
         self.pretrained_backbone_path = pretrained_backbone_path
+        self.pose_auxiliary_mode = pose_auxiliary_mode
 
         # _build() will be called in the parent class
         super().__init__(
@@ -115,7 +117,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Args:
             obs: Dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
-                - state: tensor of shape (batch_size, seq_len, 12) or None
+                - state: tensor of shape (batch_size, seq_len, 2) or None
             deterministic: Whether to sample or use deterministic actions
             dones: [Deprecated] Optional list indicating whether each sequence is done
 
@@ -147,7 +149,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Args:
             obs: Dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
-                - state: tensor of shape (batch_size, seq_len, 12) or None
+                - state: tensor of shape (batch_size, seq_len, 2) or None
             actions: Tensor of shape (batch_size, n_actions)
 
         Returns:
@@ -171,7 +173,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Args:
             obs: Dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
-                - state: tensor of shape (batch_size, seq_len, 12) or None
+                - state: tensor of shape (batch_size, seq_len, 2) or None
             dones: Optional list indicating whether each sequence is done
 
         Returns:
@@ -206,7 +208,8 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             encoder_name=self.encoder_name,
             hidden_dim=self.hidden_dim,
             head_hidden_dims=self.head_hidden_dims,
-            max_seq_len=self.max_seq_len,
+            seq_len=self.seq_len,
+            pose_auxiliary_mode=self.pose_auxiliary_mode,
         ).to(self.device)
 
         # log_std for the action distribution
@@ -233,7 +236,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
         Args:
             obs: Dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
-                - state: tensor of shape (batch_size, 12) or None
+                - state: tensor of shape (batch_size, 2) or None
             deterministic: Whether or not to return deterministic actions.
 
         Returns:
@@ -301,7 +304,7 @@ class NavActorCriticPolicy(ActorCriticPolicy):
 
             actions = self.nav_policy.predict(
                 {"image": obs, "state": None},
-                seq_len=self.max_seq_len,
+                seq_len=self.seq_len,
                 clear_cache=clear_cache,
             )
             distribution = self._get_action_dist_from_latent(actions)

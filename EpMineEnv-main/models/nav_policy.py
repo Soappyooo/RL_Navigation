@@ -2,7 +2,7 @@ import torch
 import torch.nn as nn
 from .temporal_encoders import TemporalEncoder
 from .backbones import VisualBackbone
-from typing import Dict, Optional, List, Union
+from typing import Dict, Optional, List, Union, Literal
 import numpy as np
 
 
@@ -32,7 +32,7 @@ class MLP(nn.Module):
         input_dim: int,
         output_dim: int,
         hidden_dims: tuple = (512,),
-        activation: str = "SiLU",
+        activation: Literal["SiLU", "ReLU", "Tanh"] = "SiLU",
     ):
         """
         Initialize the MLP class.
@@ -82,11 +82,12 @@ class MLP(nn.Module):
 class NavPolicy(nn.Module):
     def __init__(
         self,
-        backbone_name: str,
-        encoder_name: str,
+        backbone_name: Literal["efficientnet", "simple"],
+        encoder_name: Literal["identity", "lstm", "transformer", "mlp"],
         hidden_dim: int = 512,
         head_hidden_dims: tuple = (256, 128),
-        max_seq_len: int = 8,
+        seq_len: int = 1,
+        pose_auxiliary_mode: Literal["naive", "concatenate"] = "naive",
     ):
         """
         Initialize the Navigation Policy class.
@@ -98,28 +99,41 @@ class NavPolicy(nn.Module):
             encoder_name (str): Name of the temporal encoder architecture.
             hidden_dim (int): Hidden dimension of the policy. Defaults to 512.
             head_hidden_dims (tuple): Tuple of hidden dimensions for the heads. Defaults to (256, 128).
-            max_seq_len (int): Maximum sequence length for positional encoding. Defaults to 8.
+            max_seq_len (int): Sequence length for image and state inputs. Defaults to 1.
+            pose_auxiliary_mode (str): Mode for pose auxiliary task. Defaults to "naive".
         """
-        # action space: gym.spaces.Box(
-        #     low=np.array([-10.0, -10.0, -3.0]), high=np.array([10.0, 10.0, 3.0]), shape=(3,), dtype=np.float32
-        # )
-        # observation space: gym.spaces.Dict(
-        #     {
-        #         "image": gym.spaces.Box(low=0, high=1.0, shape=image_shape, dtype=np.float32),
-        #         "state": gym.spaces.Box(low=-np.Inf, high=np.Inf, shape=state_shape, dtype=np.float32),
-        #     }
-        # )
         super(NavPolicy, self).__init__()
+        self.pose_auxiliary_mode = pose_auxiliary_mode
+
         self.visual_backbone = VisualBackbone(backbone_name, hidden_dim)
-        self.temporal_encoder = TemporalEncoder(encoder_name, hidden_dim, max_seq_len)
-        self.actor_head = MLP(hidden_dim, 3, head_hidden_dims, activation="Tanh")
-        # Use uniform initialization and make last layer small according to https://arxiv.org/pdf/2006.05990
-        self.actor_head.uniform_init(final_layer_scale=0.01)
-        self.critic_head = MLP(hidden_dim, 1, head_hidden_dims, activation="SiLU")
-        self.pose_head = MLP(hidden_dim, 2, head_hidden_dims, activation="SiLU")
+        self.temporal_encoder = TemporalEncoder(encoder_name, hidden_dim, seq_len)
+
+        if pose_auxiliary_mode == "naive":
+            self.actor_head = MLP(hidden_dim, 3, head_hidden_dims, activation="Tanh")
+            # Use uniform initialization and make last layer small according to https://arxiv.org/pdf/2006.05990
+            self.actor_head.uniform_init(final_layer_scale=0.01)
+            self.critic_head = MLP(hidden_dim, 1, head_hidden_dims, activation="SiLU")
+            self.pose_head = MLP(hidden_dim, 2, head_hidden_dims, activation="SiLU")
+
+        elif pose_auxiliary_mode == "concatenate":
+            pose_feat_dim = 32
+            self.actor_head = MLP(hidden_dim + pose_feat_dim, 3, head_hidden_dims, activation="Tanh")
+            # Use uniform initialization and make last layer small according to https://arxiv.org/pdf/2006.05990
+            self.actor_head.uniform_init(final_layer_scale=0.01)
+            self.critic_head = MLP(hidden_dim + pose_feat_dim, 1, head_hidden_dims, activation="SiLU")
+            # separate pose visual backbone
+            self.pose_visual_backbone = VisualBackbone(backbone_name, hidden_dim)
+            self.pose_head = MLP(hidden_dim * seq_len, 2, head_hidden_dims, activation="SiLU")
+            self.pose_projection = nn.Linear(2, pose_feat_dim)  # project pose to hidden_dim
+            # concatenate pose projection and output from temporal encoder
+            # self.concatenate_layer = nn.Sequential(nn.Linear(hidden_dim + 32, hidden_dim))
+
+        else:
+            raise ValueError(f"Unsupported pose auxiliary mode: {pose_auxiliary_mode}")
+
         self.hidden_dim = hidden_dim
         self.head_hidden_dims = head_hidden_dims
-        self.max_seq_len = max_seq_len
+        self.seq_len = seq_len
         self.backbone_name = backbone_name
         self.encoder_name = encoder_name
         self.action_low = torch.tensor([-10.0, -10.0, -3.0])
@@ -150,7 +164,7 @@ class NavPolicy(nn.Module):
         Args:
             x (Dict[str, torch.Tensor]): Input dictionary containing:
                 - image: tensor of shape (batch_size, seq_len, channels, height, width)
-                - state: tensor of shape (batch_size, seq_len, 12) or None
+                - state: tensor of shape (batch_size, seq_len, 2) or None
             output_value (bool): If True, compute the value (critic head). Defaults to True.
             output_pose (bool): If True, compute the pose (pose head). Defaults to True.
             output_action (bool): If True, compute the action (actor head). Defaults to True.
@@ -179,29 +193,47 @@ class NavPolicy(nn.Module):
         # pass through temporal encoder
         feat = self.temporal_encoder(feat)  # (batch_size, hidden_dim)
 
-        # pass through critic head
-        if output_value:
-            value = self.critic_head(feat)  # (batch_size, 1)
-        else:
-            value = None
+        if self.pose_auxiliary_mode == "naive":
+            # pass through critic head
+            if output_value:
+                value = self.critic_head(feat)  # (batch_size, 1)
+            else:
+                value = None
 
-        # pass through actor head
-        if output_action:
-            action = self.actor_head(feat)  # (batch_size, 3)
-            action = torch.tanh(action)  # normalize to [-1,1]
-            # we scale it after normal distribution, moving line below to nav_policy_wrapper.py
-            # action = self._unnormalize_action(action)  # scale to actual action space
-        else:
-            action = None
+            # pass through actor head
+            if output_action:
+                action = self.actor_head(feat)  # (batch_size, 3)
+                action = torch.tanh(action)  # normalize to [-1,1]
+            else:
+                action = None
 
-        # pass through pose head
-        if output_pose:
-            pose = self.pose_head(feat)  # (batch_size, 3 + 9)
+            # pass through pose head
+            if output_pose:
+                pose = self.pose_head(feat)  # (batch_size, 3 + 9)
+            else:
+                pose = None
 
-            # svd not implemented for AMP (half precision)
-            # pose[:, 3:] = rot9d_to_rotmat(pose[:, 3:]).view(-1, 9)  # reconstruct rotation matrix
-        else:
-            pose = None
+        elif self.pose_auxiliary_mode == "concatenate":
+            # get pose
+            pose_feat = self.pose_visual_backbone(image)  # (batch_size * seq_len, hidden_dim)
+            pose_feat = pose_feat.view(batch_size, -1)  # (batch_size, hidden_dim * seq_len)
+            pose = self.pose_head(pose_feat)  # (batch_size, 2)
+
+            # pose_projection = self.pose_projection(pose.detach())  # (batch_size, hidden_dim), detach to avoid gradient
+            pose_projection = self.pose_projection(x["state"][:, -1, :].float() / 3)  # use real pose and normalize
+            # feat = self.concatenate_layer(torch.cat((pose_projection, feat), dim=1))  # (batch_size, hidden_dim)
+            feat = torch.cat((pose_projection, feat), dim=1)  # (batch_size, hidden_dim - 32 + 32)
+            # pass through critic head
+            if output_value:
+                value = self.critic_head(feat)
+            else:
+                value = None
+            # pass through actor head
+            if output_action:
+                action = self.actor_head(feat)
+                action = torch.tanh(action)
+            else:
+                action = None
 
         return action, value, pose
 

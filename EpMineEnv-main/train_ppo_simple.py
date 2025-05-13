@@ -17,6 +17,9 @@ def seed_all(seed: int):
     np.random.seed(seed)
     torch.manual_seed(seed)
     random.seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = False
 
 
 def main():
@@ -43,7 +46,7 @@ def main():
         env_kwargs=dict(
             time_scale=time_scale,
             max_episode_steps=episode_length,
-            only_image=True,
+            only_image=False,
             only_state=False,
             history_length=seq_len,
             obs_interval=obs_interval,
@@ -64,6 +67,7 @@ def main():
         policy_kwargs=dict(
             backbone_name="simple",
             encoder_name="identity",
+            pose_auxiliary_mode="concatenate",
             hidden_dim=512,
             head_hidden_dims=(256, 128),
             max_seq_len=seq_len,

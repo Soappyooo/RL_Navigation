@@ -322,7 +322,7 @@ class EpMineEnv(gym.Env):
         if seed is not None:
             self.seed_value = seed
         if self.env is not None:
-            self.env.set_seed(seed)
+            self.env.set_seed(self.seed_value)
         self.work_id = seed if seed is not None else self.work_id
 
     def initialize_environment(self, seed: Optional[int] = None) -> None:
@@ -537,16 +537,17 @@ class EpMineEnv(gym.Env):
         sparse_reward = results.reward[AGENT_ID]
         # Assume positive sparse_reward for reach mineral
         success = 1 if sparse_reward > 0 else 0
-        terminal_reward = 2.5 * success
+        terminal_reward = 10 * success
         current_dist = self.calculate_distance_to_mineral(results)
-        distance_reward = self.last_distance - current_dist - 0.01
+        distance_reward = self.last_distance - current_dist
 
-        nearby = 1 if current_dist < 0.45 else 0
-        nearby_reward = 2.5 * (nearby - self.last_nearby)
+        # nearby = 1 if current_dist < 0.45 else 0
+        # nearby_reward = 2.5 * (nearby - self.last_nearby)
 
-        enhanced_reward = terminal_reward + distance_reward + nearby_reward
+        # enhanced_reward = terminal_reward + distance_reward + nearby_reward
+        enhanced_reward = terminal_reward + distance_reward
         self.last_distance = current_dist
-        self.last_nearby = nearby
+        # self.last_nearby = nearby
         return enhanced_reward
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, Any], float, bool, dict]:
@@ -605,8 +606,8 @@ class EpMineEnv(gym.Env):
         else:
             self.current_results = decision_steps
         obs = self.decode_observation(self.current_results)
-        reward = self.calculate_reward(self.current_results)
-        # reward = self.calculate_reward_enhanced(self.current_results)
+        # reward = self.calculate_reward(self.current_results)
+        reward = self.calculate_reward_enhanced(self.current_results)
 
         # Check if the robot is flipped over
         rotmat = self.get_robot_pose(self.current_results)[1]

@@ -1,13 +1,19 @@
 import torch
 import torch.nn as nn
 from .utils import PositionalEncoding
-from typing import List, Union
+from typing import List, Union, Literal
 import torch.nn.functional as F
 import numpy as np
 
 
 class TemporalEncoder(nn.Module):
-    def __init__(self, name: str, dim: int = 512, max_seq_len: int = 8, num_layers: int = 2):
+    def __init__(
+        self,
+        name: Literal["transformer", "lstm", "identity", "mlp"],
+        dim: int = 512,
+        max_seq_len: int = 8,
+        num_layers: int = 2,
+    ):
         """
         Initialize the TemporalEncoder class.
 
