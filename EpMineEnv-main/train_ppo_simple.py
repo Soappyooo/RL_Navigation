@@ -35,7 +35,7 @@ def main():
     episode_length = 2048
     time_scale = 5
     obs_interval = 1
-    use_amp = True
+    use_amp = False
 
     seed_all(seed)
     env = make_vec_env(
@@ -69,9 +69,8 @@ def main():
             max_seq_len=seq_len,
             optimizer_kwargs=dict(weight_decay=0),
         ),
-        # n_steps=8192 // n_envs,
-        n_steps=int(episode_length * 0.125),  # every env collect at least n episode before update
-        batch_size=512,  # 512 and seq_len=4 for 16 GB VRAM
+        n_steps=8192 // n_envs,
+        batch_size=2048,
         n_epochs=10,
         learning_rate=3e-4,
         ent_coef=3e-5,

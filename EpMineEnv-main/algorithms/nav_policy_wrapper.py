@@ -72,6 +72,11 @@ class NavActorCriticPolicy(ActorCriticPolicy):
             self.nav_policy.visual_backbone.load_backbone_state_dict(
                 th.load(self.pretrained_backbone_path, map_location=self.device, weights_only=True)
             )
+            # freeze the backbone parameters
+            for param in self.nav_policy.visual_backbone.parameters():
+                param.requires_grad = False
+            # set the backbone to eval mode
+            self.nav_policy.visual_backbone.eval()
             print(f"Loaded pretrained backbone from {self.pretrained_backbone_path.resolve()}")
 
         self.action_space_high: th.Tensor = th.as_tensor(action_space.high).to(self.device)
