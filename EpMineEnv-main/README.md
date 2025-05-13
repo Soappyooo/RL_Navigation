@@ -62,9 +62,26 @@ mlagents-envs提供了`no-graphics`仿真模式，但是在该模式下图像不
 chmod +x drl.x86_64
 ```
 
+## Checkpoint
+给出训练好的checkpoint文件，[从OneDrive下载](https://mailsucasaccn-my.sharepoint.com/:u:/g/personal/fandongxuan24_mails_ucas_ac_cn/EbHp47b8brpIpzthzeWfSZABWClaWAvpYzJ_30BxhXycnA?e=ewSthC)（42MB）  
+可以通过训练脚本中的`model.set_parameters()`方法，或评估脚本中`--model-path`参数，传入checkpoint路径。
+
 ## 训练
 
+在训练前，先调整`n_envs`参数，设置训练的环境数量。由于给定的环境存在问题，训练难以复现。
+默认的训练参数应该得到与Baseline_with_pose类似的结果。训练脚本位于：  
+```bash
+cd EpMineEnv-main
+python train_ppo_simple.py
 ```
-python train_ppo.py
+在评估前，前往`EpMineEnv-main/models/nav_policy.py`中，修改约222行的：
+```python
+# pose_projection = self.pose_projection(pose.detach() / 3)  # (batch_size, hidden_dim), avoid gradient
+pose_projection = self.pose_projection(x["state"][:, -1, :].float() / 3)  # use real pose and normalize
 ```
+将第一行取消注释，第二行注释，以确保评估时使用训练得到的pose。  
+使用`evaluate.py`脚本评估训练好的模型，需要指定模型路径。  
+
+
+
 

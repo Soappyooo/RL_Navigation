@@ -2,5 +2,5 @@
 __pycache__/
 EpMineEnv-main/envs/SingleAgent/MineField
 EpMineEnv-main/checkpoints/*
-EpMineEnv-main/logs/tensorboard/*
+EpMineEnv-main/logs/tensorboard/PPO_*
 EpMineEnv-main/notebooks/*
