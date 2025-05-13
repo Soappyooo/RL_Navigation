@@ -221,7 +221,6 @@ class NavPolicy(nn.Module):
 
             # pose_projection = self.pose_projection(pose.detach())  # (batch_size, hidden_dim), detach to avoid gradient
             pose_projection = self.pose_projection(x["state"][:, -1, :].float() / 3)  # use real pose and normalize
-            # feat = self.concatenate_layer(torch.cat((pose_projection, feat), dim=1))  # (batch_size, hidden_dim)
             feat = torch.cat((pose_projection, feat), dim=1)  # (batch_size, hidden_dim - 32 + 32)
             # pass through critic head
             if output_value:

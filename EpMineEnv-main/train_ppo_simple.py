@@ -31,14 +31,13 @@ def main():
             f"Please run this script from the EpMineEnv-main directory." f" Current directory: {Path.cwd()}"
         )
 
-    seed = 0
+    seed = 0  # seed not working for the env
     n_envs = 32  # 32 for At least 24GB RAM
-    n_envs_eval = 2
-    seq_len = 1
-    episode_length = 2048
-    time_scale = 5
-    obs_interval = 1
-    use_amp = False
+    seq_len = 1  # sequence length (num frames) for observation, also determines model input shape
+    episode_length = 2048  # max episode length. Actual episode length decreases with training
+    time_scale = 5  # time scale for the environment, larger values make the environment runs faster but renders slower
+    obs_interval = 1  # interval between observations, e.g. 1 means every frame, 2 means every other frame
+    use_amp = False  # use automatic mixed precision for training
 
     seed_all(seed)
     env = make_vec_env(
@@ -46,7 +45,7 @@ def main():
         env_kwargs=dict(
             time_scale=time_scale,
             max_episode_steps=episode_length,
-            only_image=False,
+            only_image=False,  # True for only image, which will set state to all zero
             only_state=False,
             history_length=seq_len,
             obs_interval=obs_interval,
@@ -57,14 +56,10 @@ def main():
         vec_env_cls=SubprocVecEnv,
     )
 
-    # TODO: weight decay 1e-3 (https://openreview.net/forum?id=m9Jfdz4ymO)
-    # TODO: seperate pose prediction head
-    # TODO: lr 3e-4, n_epochs 3, gae_lambda 0.9, ent_coef 3e-5
-
     model = CustomPPO(
         NavActorCriticPolicy,
         env,
-        policy_kwargs=dict(
+        policy_kwargs=dict(  # arguments passed to NavActorCriticPolicy.__init__()
             backbone_name="simple",
             encoder_name="identity",
             pose_auxiliary_mode="concatenate",
@@ -73,13 +68,13 @@ def main():
             seq_len=seq_len,
             optimizer_kwargs=dict(weight_decay=0),
         ),
-        n_steps=8192 // n_envs,
-        batch_size=2048,
-        n_epochs=10,
+        n_steps=8192 // n_envs,  # before each update, envs collect a total number of n_steps*n_envs steps
+        batch_size=2048,  # batch size for training
+        n_epochs=10,  # number of epochs for training
         learning_rate=3e-4,
-        ent_coef=3e-5,
-        vf_coef=0.5,
-        pose_coef=0.02,
+        ent_coef=3e-5,  # entropy coefficient
+        vf_coef=0.5,  # value function coefficient
+        pose_coef=0.02,  # pose auxiliary loss coefficient, big value may be unstable
         clip_range=0.2,
         gae_lambda=0.95,
         verbose=1,
@@ -88,7 +83,7 @@ def main():
         tensorboard_log="./logs/tensorboard",
     )
     total_params = sum(p.numel() for p in model.policy.parameters() if p.requires_grad)
-    print(f"Total parameters: {total_params:,}")  # 1.6M
+    print(f"Total parameters: {total_params:,}")
 
     # Set up callbacks
     checkpoint_callback = CheckpointCallback(
