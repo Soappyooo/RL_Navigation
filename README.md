@@ -43,3 +43,36 @@ pip install protobuf~=3.20 tensorboard ipykernel pynput
 ## 1.3 最后：下载仿真环境
 参考原项目[仿真环境下载](https://github.com/DRL-CASIA/EpMineEnv#%E4%BB%BF%E7%9C%9F%E7%8E%AF%E5%A2%83%E4%B8%8B%E8%BD%BD)部分。
 让drl可执行文件（drl.x86_64或drl.exe）在`EpMineEnv-main/envs/SingleAgent/MineField/`目录下。(例如，在Windows下修改下载的`MineField_Windows-0510-random`文件夹名称为`MineField`，并移动到`EpMineEnv-main/envs/SingleAgent/`)
+
+## 2 Checkpoint
+给出训练好的checkpoint文件，[从OneDrive下载](https://mailsucasaccn-my.sharepoint.com/:u:/g/personal/fandongxuan24_mails_ucas_ac_cn/EbHp47b8brpIpzthzeWfSZABWClaWAvpYzJ_30BxhXycnA?e=ewSthC)（42MB）  
+可以通过训练脚本中的`model.set_parameters()`方法，或评估脚本中`--model-path`参数，传入checkpoint路径。  
+
+该checkpoint的测试结果为：
+```yaml
+Deterministic Action:
+    Mean reward: 11.51 +/- 2.38
+    Mean episode length: 47.39 +/- 92.33
+    Success rate: 0.96
+Non-deterministic Action:
+    Mean reward: 11.71 +/- 2.07
+    Mean episode length: 44.18 +/- 64.36
+    Success rate: 0.99
+```
+
+## 3 训练
+
+在训练前，先调整`n_envs`参数，设置训练的环境数量。由于给定的环境存在问题，训练难以复现。
+默认的训练参数应该得到与Baseline_with_pose类似的结果。训练脚本位于：  
+```bash
+cd EpMineEnv-main
+python train_ppo_simple.py
+```
+在评估前，前往`EpMineEnv-main/models/nav_policy.py`中，修改约222行的：
+```python
+# pose_projection = self.pose_projection(pose.detach() / 3)  # (batch_size, hidden_dim), avoid gradient
+pose_projection = self.pose_projection(x["state"][:, -1, :].float() / 3)  # use real pose and normalize
+```
+将第一行取消注释，第二行注释，以确保评估时使用训练得到的pose。  
+使用`evaluate.py`脚本评估训练好的模型，需要指定模型路径。  
+
