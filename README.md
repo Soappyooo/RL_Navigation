@@ -37,7 +37,7 @@ pip install setuptools==65.5.0 pip==21 && \
 pip install wheel==0.38.0 && \
 pip install mlagents-envs opencv-python==4.5.5.64 && \
 pip install stable-baselines3==1.5.0 gym torch accelerate && \
-pip install protobuf~=3.20
+pip install protobuf~=3.20 tensorboard ipykernel pynput
 ```
 
 ## 1.3 最后：下载仿真环境
