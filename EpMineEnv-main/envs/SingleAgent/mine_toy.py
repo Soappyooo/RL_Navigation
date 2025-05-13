@@ -606,8 +606,8 @@ class EpMineEnv(gym.Env):
         else:
             self.current_results = decision_steps
         obs = self.decode_observation(self.current_results)
-        # reward = self.calculate_reward(self.current_results)
-        reward = self.calculate_reward_enhanced(self.current_results)
+        reward = self.calculate_reward(self.current_results)
+        # reward = self.calculate_reward_enhanced(self.current_results)
 
         # Check if the robot is flipped over
         rotmat = self.get_robot_pose(self.current_results)[1]
