@@ -54,6 +54,8 @@ def evaluate_model(
     std_reward = np.std(episode_rewards)
     mean_length = np.mean(episode_lengths)
     std_length = np.std(episode_lengths)
+    print(f"Total episodes: {n_episodes}, deterministic: {deterministic}")
+    print(f"Success rate: {np.sum(np.array(episode_lengths)<512) / n_episodes:.2f}")
     print(f"Mean reward: {mean_reward:.2f} +/- {std_reward:.2f}")
     print(f"Mean episode length: {mean_length:.2f} +/- {std_length:.2f}")
 
@@ -61,11 +63,13 @@ def evaluate_model(
 
 
 if __name__ == "__main__":
-    default_model_path = "./checkpoints/simplenav_1/ppo_model_1000000_steps.zip"  # Change this to your model path
-    default_n_envs = 32
+    default_model_path = (
+        "./checkpoints/baseline_with_pose/ppo_model_1000000_steps.zip"  # Change this to your model path
+    )
+    default_n_envs = 16
     default_episodes = 20 * default_n_envs
     default_time_scale = 5
-    default_deterministic = True
+    default_deterministic = False
     default_history_length = 1
     default_obs_interval = 1
 
